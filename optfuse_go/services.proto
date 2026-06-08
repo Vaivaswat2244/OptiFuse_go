@@ -1,0 +1,92 @@
+syntax = "proto3";
+
+package optifuse.services.v1;
+option go_package = "github.com/Vaivaswat2244/OptiFuse_go/proto/services/v1;servicesv1";
+
+import "graph.proto";
+import "optimizer.proto";
+
+// ─────────────────────────────────────────────
+// Parser service
+// Translates a raw serverless.yml into a Graph.
+// No AWS credentials required — purely stateless.
+// ─────────────────────────────────────────────
+
+message ParseRequest {
+  string repo_name    = 1;
+  bytes  yaml_content = 2;  // raw serverless.yml bytes
+}
+
+message ParseResponse {
+  optifuse.graph.v1.Graph graph = 1;
+  repeated string warnings      = 2;  // non-fatal issues (e.g. missing topology block)
+}
+
+service ParserService {
+  rpc Parse(ParseRequest) returns (ParseResponse);
+}
+
+// ─────────────────────────────────────────────
+// Enricher service
+// Takes a Graph from the parser and fills in telemetry fields
+// by querying CloudWatch Logs Insights.
+// Requires AWS read credentials (passed as assumed-role ARN).
+// ─────────────────────────────────────────────
+
+message EnrichRequest {
+  optifuse.graph.v1.Graph graph = 1;
+
+  // AWS assume-role parameters — corresponds to get_assumed_role_session() in aws.py
+  string role_arn    = 2;  // e.g. "arn:aws:iam::123456789012:role/OptifuseReader"
+  string external_id = 3;
+
+  // Serverless Framework deployment identifiers — needed to build log group names:
+  // /aws/lambda/{service_name}-{stage}-{function_id}
+  string service_name = 4;
+  string stage        = 5;
+
+  // How far back to query. Defaults to 24h if zero.
+  int32  lookback_hours = 6;
+}
+
+message EnrichResponse {
+  optifuse.graph.v1.Graph graph = 1;  // same graph, telemetry fields now populated
+  repeated string enriched_ids  = 2;  // function IDs that had CloudWatch data
+  repeated string missing_ids   = 3;  // function IDs with no log data found
+}
+
+service EnricherService {
+  rpc Enrich(EnrichRequest) returns (EnrichResponse);
+}
+
+// ─────────────────────────────────────────────
+// Deployer service
+// Takes the original YAML + an OptimizationPlan,
+// emits an optimized serverless.yml, and optionally deploys it.
+// Requires AWS write credentials.
+// ─────────────────────────────────────────────
+
+message DeployRequest {
+  bytes  original_yaml_content    = 1;  // the original serverless.yml bytes
+  optifuse.optimizer.v1.AlgorithmResult result = 2;  // the chosen fusion plan
+
+  // AWS credentials for deployment
+  string role_arn    = 3;
+  string external_id = 4;
+  string region      = 5;
+
+  // If false: only generate the optimized YAML, don't actually deploy.
+  // If true: generate + run `serverless deploy`.
+  bool   deploy_live = 6;
+}
+
+message DeployResponse {
+  bytes  optimized_yaml  = 1;  // the generated serverless.yml bytes
+  bool   deployed        = 2;  // true if deploy_live was true and succeeded
+  string deploy_log      = 3;  // stdout/stderr from the deploy command
+  string error           = 4;
+}
+
+service DeployerService {
+  rpc Deploy(DeployRequest) returns (DeployResponse);
+}
