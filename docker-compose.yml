@@ -1,0 +1,104 @@
+version: '3.9'
+
+# OptiFuse microservices — local development
+# All services communicate over gRPC on an internal Docker network.
+# Only the gateway exposes a port to the host.
+
+networks:
+  optifuse:
+    driver: bridge
+
+services:
+
+  # ── Parser service ──────────────────────────────────────────────────────────
+  # Stateless. No credentials. Pure YAML → Graph transform.
+  parser:
+    build:
+      context: .
+      dockerfile: services/parser/Dockerfile
+    networks: [optifuse]
+    ports:
+      - "50051:50051"   # gRPC (internal only in prod; exposed here for debugging)
+    healthcheck:
+      test: ["CMD", "grpc_health_probe", "-addr=:50051"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ── Enricher service ────────────────────────────────────────────────────────
+  # Requires AWS read credentials (CloudWatch, X-Ray).
+  # Credentials are passed per-request as assumed-role ARN; no env vars needed.
+  enricher:
+    build:
+      context: .
+      dockerfile: services/enricher/Dockerfile
+    networks: [optifuse]
+    ports:
+      - "50052:50052"
+    healthcheck:
+      test: ["CMD", "grpc_health_probe", "-addr=:50052"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ── Optimizer service ───────────────────────────────────────────────────────
+  # Stateless. No AWS credentials. Pure computation.
+  # Installs glpk-utils for the MtxILP algorithm.
+  optimizer:
+    build:
+      context: .
+      dockerfile: services/optimizer/Dockerfile
+    networks: [optifuse]
+    ports:
+      - "50053:50053"
+    healthcheck:
+      test: ["CMD", "grpc_health_probe", "-addr=:50053"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ── Deployer service ────────────────────────────────────────────────────────
+  # Requires AWS write credentials (Lambda, CloudFormation, S3).
+  # Needs Node.js + Serverless Framework installed to run `serverless deploy`.
+  deployer:
+    build:
+      context: .
+      dockerfile: services/deployer/Dockerfile
+    networks: [optifuse]
+    ports:
+      - "50054:50054"
+    healthcheck:
+      test: ["CMD", "grpc_health_probe", "-addr=:50054"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ── API Gateway ─────────────────────────────────────────────────────────────
+  # The only service exposed to the outside world.
+  # Speaks REST/JSON to the Next.js frontend and gRPC to internal services.
+  gateway:
+    build:
+      context: .
+      dockerfile: services/gateway/Dockerfile
+    networks: [optifuse]
+    ports:
+      - "8080:8080"   # REST API — frontend points here
+    environment:
+      - PARSER_ADDR=parser:50051
+      - ENRICHER_ADDR=enricher:50052
+      - OPTIMIZER_ADDR=optimizer:50053
+      - DEPLOYER_ADDR=deployer:50054
+    depends_on:
+      parser:
+        condition: service_healthy
+      enricher:
+        condition: service_healthy
+      optimizer:
+        condition: service_healthy
+      deployer:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
