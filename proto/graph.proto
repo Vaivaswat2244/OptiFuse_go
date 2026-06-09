@@ -1,0 +1,69 @@
+syntax = "proto3";
+
+package optifuse.graph.v1;
+option go_package = "github.com/Vaivaswat2244/OptiFuse_go/proto/graph/v1;graphv1";
+
+// ─────────────────────────────────────────────
+// Core domain types — translated from structures.py
+// ─────────────────────────────────────────────
+
+// Corresponds to LambdaFunction in structures.py.
+// Fields are split into two groups:
+//   - Static: sourced from serverless.yml by the parser service
+//   - Telemetry: filled in by the enricher service (zero value = not yet enriched)
+message FunctionNode {
+  // ── Static fields (from YAML) ──────────────────────────────────────────────
+  string id             = 1;  // unique key within the application, e.g. "resize"
+  string name           = 2;  // human-readable, same as id for now
+  int32  memory_mb      = 3;  // memorySize from YAML or provider default
+  int32  timeout_sec    = 4;  // timeout in seconds
+  string handler        = 5;  // e.g. "src/resize.handler"
+  string runtime        = 6;  // e.g. "nodejs18.x"
+  map<string, string> environment = 7;
+
+  // data_out_bytes: maps child function ID → bytes transferred on that edge
+  // Corresponds to LambdaFunction.data_out_edges in structures.py
+  map<string, int64> data_out_bytes = 8;
+
+  // load_factor: multiplier on baseline_runtime. Default 1.0.
+  // Preserved from structures.py to support simulation mode.
+  double load_factor = 9;
+
+  // ── Telemetry fields (from enricher / CloudWatch) ─────────────────────────
+  // Zero value means "not yet enriched" — all algorithms must handle this gracefully.
+  double avg_duration_ms    = 20;
+  double avg_memory_used_mb = 21;
+  int64  invocation_count   = 22;
+  double error_rate         = 23;
+  double p99_latency_ms     = 24;
+  double cold_start_rate    = 25;
+}
+
+// Directed edge between two function nodes.
+// The weight is the data transfer cost in USD (pre-computed from data_out_bytes).
+// Kept separate from FunctionNode.data_out_bytes so graph algorithms can
+// work with a simple edge list without dereferencing node maps.
+message Edge {
+  string from   = 1;  // parent function ID
+  string to     = 2;  // child function ID
+  int64  data_bytes = 3;  // raw bytes transferred
+  double cost_usd   = 4;  // (data_bytes / GiB) * $0.01 — pre-computed by parser
+}
+
+// Constraints on the application — from the custom.optifuse block in serverless.yml.
+// Corresponds to the constraint fields on Application in structures.py.
+message Constraints {
+  int32  max_memory_mb     = 1;  // default 1024
+  int32  max_latency_ms    = 2;  // default 30000
+  int32  network_hop_ms    = 3;  // default 20 — latency added per cross-group call
+}
+
+// The full application graph.
+// Corresponds to Application in structures.py.
+message Graph {
+  string      name              = 1;
+  map<string, FunctionNode> nodes = 2;  // keyed by function ID
+  repeated Edge edges           = 3;
+  repeated string critical_path = 4;   // ordered list of function IDs
+  Constraints constraints       = 5;
+}
