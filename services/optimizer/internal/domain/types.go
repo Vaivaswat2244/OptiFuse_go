@@ -1,4 +1,3 @@
-package domain
 // Package domain contains the core data structures for OptiFuse.
 //
 // This is a direct translation of simulation/core/structures.py.
@@ -27,7 +26,7 @@ type LambdaFunction struct {
 	// ── Static config (from serverless.yml) ─────────────────────────────────
 	MemoryMB   int // Python: memory — in MB
 	TimeoutSec int // Python: baseline_runtime was stored in ms; we keep seconds here
-	            //          and compute ms on demand via BaselineRuntimeMs()
+	//          and compute ms on demand via BaselineRuntimeMs()
 
 	// LoadFactor multiplies the baseline runtime to simulate load.
 	// Default 1.0. Python: load_factor
@@ -169,9 +168,9 @@ type Application struct {
 	CriticalPathIDs []string
 
 	// Constraints
-	MaxMemoryMB    int     // Python: max_memory
-	MaxLatencyMS   int     // Python: max_latency
-	NetworkHopMS   int     // Python: network_hop_delay — added per cross-group call on critical path
+	MaxMemoryMB  int // Python: max_memory
+	MaxLatencyMS int // Python: max_latency
+	NetworkHopMS int // Python: network_hop_delay — added per cross-group call on critical path
 }
 
 // FunctionsMap returns a map of function ID → *LambdaFunction for O(1) lookup.
