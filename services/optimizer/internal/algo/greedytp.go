@@ -1,14 +1,13 @@
 package algo
-package algo
- 
+
 import (
 	"fmt"
 	"sort"
 	"time"
- 
+
 	"github.com/Vaivaswat2244/OptiFuse_go/services/optimizer/internal/domain"
 )
- 
+
 // ─────────────────────────────────────────────────────────────────────────────
 // GreedyTP (Greedy Tree Partitioning)
 //
@@ -25,19 +24,19 @@ import (
 // This is the most sophisticated heuristic and usually produces the best
 // cost/latency trade-off among the polynomial-time algorithms.
 // ─────────────────────────────────────────────────────────────────────────────
- 
+
 type GreedyTP struct{}
- 
+
 func (g *GreedyTP) Name() string { return "Greedy TP (GrTP)" }
- 
+
 // edge is a directed pair of function pointers used as a map key.
 type edge struct {
 	from, to string // function IDs
 }
- 
+
 func (g *GreedyTP) Optimize(app *domain.Application) AlgorithmResult {
 	start := time.Now()
- 
+
 	critPath := app.CriticalPath()
 	if len(critPath) == 0 {
 		return AlgorithmResult{
@@ -45,14 +44,14 @@ func (g *GreedyTP) Optimize(app *domain.Application) AlgorithmResult {
 			Error: "critical path is empty — check criticalPath in serverless.yml",
 		}
 	}
- 
+
 	// ── Step 1: Find minimum k cuts on critical path ─────────────────────────
 	// Python: base_latency = sum(f.runtime for f in critical_path)
 	baseLatency := 0
 	for _, f := range critPath {
 		baseLatency += f.RuntimeMs()
 	}
- 
+
 	if baseLatency > app.MaxLatencyMS {
 		return AlgorithmResult{
 			Name: g.Name(),
@@ -64,14 +63,14 @@ func (g *GreedyTP) Optimize(app *domain.Application) AlgorithmResult {
 			WallClockMs: float64(time.Since(start).Microseconds()) / 1000.0,
 		}
 	}
- 
+
 	// Build the list of edges on the critical path.
 	// Python: critical_path_edges = list(zip(critical_path[:-1], critical_path[1:]))
 	cpEdges := make([]edge, len(critPath)-1)
 	for i := 0; i < len(critPath)-1; i++ {
 		cpEdges[i] = edge{critPath[i].ID, critPath[i+1].ID}
 	}
- 
+
 	// Try k=0,1,2,... cuts until latency fits.
 	// Python: for k in range(len(critical_path_edges) + 1):
 	//             for merge_combination in itertools.combinations(critical_path_edges, k):
@@ -79,7 +78,7 @@ func (g *GreedyTP) Optimize(app *domain.Application) AlgorithmResult {
 	// Go: we replicate combinations with a recursive helper.
 	var initialCuts map[edge]bool
 	found := false
- 
+
 	for k := 0; k <= len(cpEdges); k++ {
 		// Iterate over all combinations of k edges to MERGE (i.e., NOT cut).
 		// The cuts are the remaining edges.
@@ -88,10 +87,10 @@ func (g *GreedyTP) Optimize(app *domain.Application) AlgorithmResult {
 			for _, e := range mergedEdges {
 				mergedSet[e] = true
 			}
- 
+
 			numExternal := len(cpEdges) - len(mergedEdges)
 			currentLatency := baseLatency + numExternal*app.NetworkHopMS
- 
+
 			if currentLatency <= app.MaxLatencyMS {
 				// The cut set is all cp edges NOT in mergedSet.
 				initialCuts = make(map[edge]bool)
@@ -108,7 +107,7 @@ func (g *GreedyTP) Optimize(app *domain.Application) AlgorithmResult {
 			break
 		}
 	}
- 
+
 	if !found {
 		return AlgorithmResult{
 			Name:        g.Name(),
@@ -116,7 +115,7 @@ func (g *GreedyTP) Optimize(app *domain.Application) AlgorithmResult {
 			WallClockMs: float64(time.Since(start).Microseconds()) / 1000.0,
 		}
 	}
- 
+
 	// ── Step 2: Build initial groups via BFS from barrier nodes ──────────────
 	// Barrier nodes: root + the "to" node of every initial cut.
 	// Python: initial_barrier_nodes = {app.root_function} | {child for _, child in initial_cuts}
@@ -124,19 +123,19 @@ func (g *GreedyTP) Optimize(app *domain.Application) AlgorithmResult {
 	for e := range initialCuts {
 		barrierIDs[e.to] = true
 	}
- 
+
 	fm := app.FunctionsMap()
- 
+
 	// groups_dict maps barrier function ID → list of functions in that group.
 	groupsDict := make(map[string][]*domain.LambdaFunction)
 	// nodeToBarrier maps each function ID → its barrier function.
 	nodeToBarrier := make(map[string]string)
- 
+
 	for id := range barrierIDs {
 		groupsDict[id] = []*domain.LambdaFunction{fm[id]}
 		nodeToBarrier[id] = id
 	}
- 
+
 	// BFS to assign every non-barrier node to the nearest barrier.
 	// Python: q = list(initial_barrier_nodes) ... BFS ...
 	bfsQueue := make([]*domain.LambdaFunction, 0)
@@ -156,13 +155,38 @@ func (g *GreedyTP) Optimize(app *domain.Application) AlgorithmResult {
 			}
 		}
 	}
- 
+
 	// Convert map to slice.
 	groups := make([][]*domain.LambdaFunction, 0, len(groupsDict))
 	for _, g := range groupsDict {
 		groups = append(groups, g)
 	}
- 
+
+	safeGroups := make([][]*domain.LambdaFunction, 0, len(groups))
+	for _, g := range groups {
+		if domain.GroupMemory(g) <= app.MaxMemoryMB {
+			safeGroups = append(safeGroups, g)
+			continue
+		}
+		// Greedily keep functions until memory would be exceeded, eject the rest.
+		var kept []*domain.LambdaFunction
+		usedMem := 0
+		var ejected []*domain.LambdaFunction
+		for _, f := range g {
+			if usedMem+f.MemoryMB <= app.MaxMemoryMB {
+				kept = append(kept, f)
+				usedMem += f.MemoryMB
+			} else {
+				ejected = append(ejected, f)
+			}
+		}
+		safeGroups = append(safeGroups, kept)
+		for _, f := range ejected {
+			safeGroups = append(safeGroups, []*domain.LambdaFunction{f})
+		}
+	}
+	groups = safeGroups
+
 	// ── Step 3: Secondary greedy merge (only non-cut edges) ──────────────────
 	// Python: merge_candidates = [(cost, f, child) for non-cut edges]
 	//         sort desc, then merge if memory fits
@@ -187,7 +211,7 @@ func (g *GreedyTP) Optimize(app *domain.Application) AlgorithmResult {
 	sort.Slice(candidates, func(i, j int) bool {
 		return candidates[i].cost > candidates[j].cost
 	})
- 
+
 	for _, c := range candidates {
 		idx := domain.FuncToGroupIndex(groups)
 		parentIdx, pOK := idx[c.parent.ID]
@@ -200,7 +224,7 @@ func (g *GreedyTP) Optimize(app *domain.Application) AlgorithmResult {
 			groups = domain.RemoveIndex(groups, childIdx)
 		}
 	}
- 
+
 	return AlgorithmResult{
 		Name:        g.Name(),
 		Groups:      groups,
@@ -208,7 +232,7 @@ func (g *GreedyTP) Optimize(app *domain.Application) AlgorithmResult {
 		WallClockMs: float64(time.Since(start).Microseconds()) / 1000.0,
 	}
 }
- 
+
 // combinations returns all k-element subsets of edges.
 // Go equivalent of itertools.combinations(edges, k).
 func combinations(edges []edge, k int) [][]edge {

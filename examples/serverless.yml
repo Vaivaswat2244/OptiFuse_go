@@ -1,0 +1,79 @@
+service: image-processor
+
+provider:
+  name: aws
+  runtime: nodejs18.x
+  region: us-east-1
+
+functions:
+  upload:
+    handler: src/upload.handler
+    memorySize: 256
+    timeout: 1
+    events:
+      - http:
+          path: /upload
+          method: post
+
+  resize:
+    handler: src/resize.handler
+    memorySize: 512
+    timeout: 1
+
+  filter:
+    handler: src/filter.handler
+    memorySize: 512
+    timeout: 1
+
+  watermark:
+    handler: src/watermark.handler
+    memorySize: 256
+    timeout: 1
+
+  optimize:
+    handler: src/optimize.handler
+    memorySize: 512
+    timeout: 1
+
+  store:
+    handler: src/store.handler
+    memorySize: 128
+    timeout: 1
+
+custom:
+  optifuse:
+    # Topology matches the Python notebook exactly.
+    # Data bytes:
+    #   5242880 = 5 MiB
+    #   3145728 = 3 MiB
+    #   2097152 = 2 MiB
+    #   1048576 = 1 MiB
+    topology:
+      upload:
+        children:
+          resize: 5242880
+          filter: 5242880
+      resize:
+        children:
+          watermark: 2097152
+      filter:
+        children:
+          optimize: 3145728
+      watermark:
+        children:
+          store: 2097152
+      optimize:
+        children:
+          store: 1048576
+
+    # Critical path: upload → resize → watermark → store
+    criticalPath:
+      - upload
+      - resize
+      - watermark
+      - store
+
+    constraints:
+      maxMemoryMB: 1024
+      maxLatencyMS: 700
+      networkHopMS: 10
