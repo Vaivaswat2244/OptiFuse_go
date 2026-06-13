@@ -1,7 +1,7 @@
 syntax = "proto3";
 
 package optifuse.graph.v1;
-option go_package = "github.com/Vaivaswat2244/OptiFuse_go/proto/graph/v1;graphv1";
+option go_package = "github.com/Vaivaswat2244/OptiFuse_go/proto;proto";
 
 // ─────────────────────────────────────────────
 // Core domain types — translated from structures.py

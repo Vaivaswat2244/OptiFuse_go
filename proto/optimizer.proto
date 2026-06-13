@@ -1,9 +1,9 @@
 syntax = "proto3";
 
 package optifuse.optimizer.v1;
-option go_package = "github.com/Vaivaswat2244/OptiFuse_go/proto/optimizer/v1;optimizerv1";
+option go_package = "github.com/Vaivaswat2244/OptiFuse_go/proto;proto";
 
-import "graph.proto";
+import "proto/graph.proto";
 
 // ─────────────────────────────────────────────
 // Optimizer service request / response types
