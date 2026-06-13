@@ -5,57 +5,75 @@ import (
 	"fmt"
 
 	"google.golang.org/grpc"
+
+	pb "github.com/Vaivaswat2244/OptiFuse_go/proto"
 )
 
 // ── Parser client ─────────────────────────────────────────────────────────────
 
 type ParserClient struct {
-	conn *grpc.ClientConn
+	client pb.ParserServiceClient
 }
 
 func NewParserClient(conn *grpc.ClientConn) *ParserClient {
-	return &ParserClient{conn: conn}
+	return &ParserClient{client: pb.NewParserServiceClient(conn)}
 }
 
-// Parse sends a serverless.yml to the parser service and returns a graph.
-// This is a stub — will be replaced with generated proto client once
-// we run protoc.
-func (p *ParserClient) Parse(ctx context.Context, repoName string, yamlContent []byte) (map[string]any, []string, error) {
-	// TODO: replace with generated gRPC call
-	// parserpb.NewParserServiceClient(p.conn).Parse(ctx, &parserpb.ParseRequest{...})
-	return nil, nil, fmt.Errorf("parser service not yet implemented — run make proto")
+// Parse sends serverless.yml bytes to the parser service.
+// Returns the parsed Graph proto and any warnings.
+func (p *ParserClient) Parse(ctx context.Context, repoName string, yamlContent []byte) (*pb.Graph, []string, error) {
+	resp, err := p.client.Parse(ctx, &pb.ParseRequest{
+		RepoName:    repoName,
+		YamlContent: yamlContent,
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("parser.Parse: %w", err)
+	}
+	return resp.Graph, resp.Warnings, nil
 }
 
 // ── Enricher client ───────────────────────────────────────────────────────────
 
 type EnricherClient struct {
-	conn *grpc.ClientConn
+	client pb.EnricherServiceClient
 }
 
 func NewEnricherClient(conn *grpc.ClientConn) *EnricherClient {
-	return &EnricherClient{conn: conn}
+	return &EnricherClient{client: pb.NewEnricherServiceClient(conn)}
 }
 
-// Enrich sends a graph to the enricher service and returns an enriched graph.
-// Stub — will be replaced with generated proto client.
-func (e *EnricherClient) Enrich(ctx context.Context, graph map[string]any, roleARN, externalID, serviceName, stage string) (map[string]any, error) {
-	// TODO: replace with generated gRPC call
-	return nil, fmt.Errorf("enricher service not yet implemented — run make proto")
+// Enrich sends a Graph to the enricher service which fills in CloudWatch telemetry.
+func (e *EnricherClient) Enrich(ctx context.Context, graph *pb.Graph, roleARN, externalID, serviceName, stage string) (*pb.Graph, error) {
+	resp, err := e.client.Enrich(ctx, &pb.EnrichRequest{
+		Graph:       graph,
+		RoleArn:     roleARN,
+		ExternalId:  externalID,
+		ServiceName: serviceName,
+		Stage:       stage,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("enricher.Enrich: %w", err)
+	}
+	return resp.Graph, nil
 }
 
 // ── Optimizer client ──────────────────────────────────────────────────────────
 
 type OptimizerClient struct {
-	conn *grpc.ClientConn
+	client pb.OptimizerServiceClient
 }
 
 func NewOptimizerClient(conn *grpc.ClientConn) *OptimizerClient {
-	return &OptimizerClient{conn: conn}
+	return &OptimizerClient{client: pb.NewOptimizerServiceClient(conn)}
 }
 
-// Optimize sends an enriched graph to the optimizer and returns the plan.
-// Stub — will be replaced with generated proto client.
-func (o *OptimizerClient) Optimize(ctx context.Context, graph map[string]any) (any, error) {
-	// TODO: replace with generated gRPC call
-	return nil, fmt.Errorf("optimizer service not yet implemented — run make proto")
+// Optimize runs all 6 fusion algorithms on the enriched graph.
+func (o *OptimizerClient) Optimize(ctx context.Context, graph *pb.Graph) (*pb.OptimizationPlan, error) {
+	resp, err := o.client.Optimize(ctx, &pb.OptimizeRequest{
+		Graph: graph,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("optimizer.Optimize: %w", err)
+	}
+	return resp.Plan, nil
 }
