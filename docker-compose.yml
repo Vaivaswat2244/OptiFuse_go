@@ -51,6 +51,10 @@ services:
     networks: [optifuse]
     ports:
       - "50053:50053"
+    environment:
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_REGION=${AWS_REGION}
     healthcheck:
       test: ["CMD", "grpc_health_probe", "-addr=:50053"]
       interval: 10s
@@ -88,6 +92,10 @@ services:
       - ENRICHER_ADDR=enricher:50052
       - OPTIMIZER_ADDR=optimizer:50053
       - DEPLOYER_ADDR=deployer:50054
+      - DATABASE_URL=${DATABASE_URL}
+      - GITHUB_CLIENT_ID=${GITHUB_CLIENT_ID}
+      - GITHUB_CLIENT_SECRET=${GITHUB_CLIENT_SECRET}
+      - CLIENT_ORIGIN_URL=${CLIENT_ORIGIN_URL}
     depends_on:
       parser:
         condition: service_healthy
