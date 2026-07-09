@@ -20,6 +20,7 @@ type server struct {
 // Parse is the gRPC handler. It receives a ParseRequest, calls our existing
 // parser.Parse() function, and returns a ParseResponse with the Graph proto.
 func (s *server) Parse(ctx context.Context, req *pb.ParseRequest) (*pb.ParseResponse, error) {
+	log.Printf("🔥 Parser ACTIVATED: Received simulation request!")
 	parsed, err := parser.Parse(req.RepoName, req.YamlContent)
 	if err != nil {
 		return nil, err

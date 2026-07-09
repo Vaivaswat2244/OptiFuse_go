@@ -20,6 +20,7 @@ type server struct {
 
 func (s *server) Optimize(ctx context.Context, req *pb.OptimizeRequest) (*pb.OptimizeResponse, error) {
 	// Convert proto Graph → domain.Application
+	log.Printf("🔥 OPTIMIZER ACTIVATED: Received simulation request!")
 	app, err := graphToApp(req.Graph)
 	if err != nil {
 		return nil, err

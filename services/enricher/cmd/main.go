@@ -18,6 +18,7 @@ type server struct {
 }
 
 func (s *server) Enrich(ctx context.Context, req *pb.EnrichRequest) (*pb.EnrichResponse, error) {
+	log.Printf("🔥 Enricher ACTIVATED: Received simulation request!")
 	graph, enrichedIDs, missingIDs, err := s.enricher.Enrich(
 		ctx,
 		req.Graph,
