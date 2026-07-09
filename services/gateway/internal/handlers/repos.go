@@ -70,7 +70,7 @@ func GetRepoFile(database *db.Pool) gin.HandlerFunc {
 // Python: requests.get('https://api.github.com/user/repos?sort=updated', ...)
 func fetchGitHubRepos(accessToken string) ([]json.RawMessage, error) {
 	req, err := http.NewRequest(http.MethodGet,
-		"https://api.github.com/user/repos?sort=updated", nil)
+		"https://api.github.com/user/repos?sort=updated&per_page=100", nil)
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
