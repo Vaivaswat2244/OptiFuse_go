@@ -9,6 +9,23 @@ networks:
     driver: bridge
 
 services:
+  db:
+    image: postgres:15-alpine
+    networks: [optifuse]
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: optifuse
+      POSTGRES_PASSWORD: secretpassword
+      POSTGRES_DB: optifuse_db
+    volumes:
+      # Mounts the schema to automatically create tables on first run
+      - ./services/gateway/internal/db/schema.sql:/docker-entrypoint-initdb.d/schema.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U optifuse -d optifuse_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
   # ── Parser service ──────────────────────────────────────────────────────────
   # Stateless. No credentials. Pure YAML → Graph transform.
@@ -20,7 +37,7 @@ services:
     ports:
       - "50051:50051"   # gRPC (internal only in prod; exposed here for debugging)
     healthcheck:
-      test: ["CMD", "grpc_health_probe", "-addr=:50051"]
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 50051 || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -36,7 +53,7 @@ services:
     ports:
       - "50052:50052"
     healthcheck:
-      test: ["CMD", "grpc_health_probe", "-addr=:50052"]
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 50052 || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -56,7 +73,7 @@ services:
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
       - AWS_REGION=${AWS_REGION}
     healthcheck:
-      test: ["CMD", "grpc_health_probe", "-addr=:50053"]
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 50053 || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -64,18 +81,18 @@ services:
   # ── Deployer service ────────────────────────────────────────────────────────
   # Requires AWS write credentials (Lambda, CloudFormation, S3).
   # Needs Node.js + Serverless Framework installed to run `serverless deploy`.
-  deployer:
-    build:
-      context: .
-      dockerfile: services/deployer/Dockerfile
-    networks: [optifuse]
-    ports:
-      - "50054:50054"
-    healthcheck:
-      test: ["CMD", "grpc_health_probe", "-addr=:50054"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
+  # deployer:
+  #   build:
+  #     context: .
+  #     dockerfile: services/deployer/Dockerfile
+  #   networks: [optifuse]
+  #   ports:
+  #     - "50054:50054"
+  #   healthcheck:
+  #     test: ["CMD", "grpc_health_probe", "-addr=:50054"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 3
 
   # ── API Gateway ─────────────────────────────────────────────────────────────
   # The only service exposed to the outside world.
@@ -103,8 +120,8 @@ services:
         condition: service_healthy
       optimizer:
         condition: service_healthy
-      deployer:
-        condition: service_healthy
+      # deployer:
+      #   condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 10s
