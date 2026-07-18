@@ -12,13 +12,10 @@ import (
 	parser "github.com/Vaivaswat2244/OptiFuse_go/services/parser/internal"
 )
 
-// server implements the ParserService gRPC interface.
 type server struct {
 	pb.UnimplementedParserServiceServer
 }
 
-// Parse is the gRPC handler. It receives a ParseRequest, calls our existing
-// parser.Parse() function, and returns a ParseResponse with the Graph proto.
 func (s *server) Parse(ctx context.Context, req *pb.ParseRequest) (*pb.ParseResponse, error) {
 	log.Printf("🔥 Parser ACTIVATED: Received simulation request!")
 	parsed, err := parser.Parse(req.RepoName, req.YamlContent)
@@ -64,7 +61,7 @@ func (s *server) Parse(ctx context.Context, req *pb.ParseRequest) (*pb.ParseResp
 		CriticalPath: parsed.CriticalPath,
 		Constraints: &pb.Constraints{
 			MaxMemoryMb:  int32(parsed.MaxMemoryMB),
-			MaxLatencyMs: int32(parsed.MaxLatencyMS),
+			MaxLatencyMs: int32(parsed.MaxLatencyMS),	
 			NetworkHopMs: int32(parsed.NetworkHopMS),
 		},
 	}
