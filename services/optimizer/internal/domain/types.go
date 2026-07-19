@@ -263,18 +263,22 @@ func (a *Application) CalculateMetrics(groups [][]*LambdaFunction) Metrics {
 	// ── Latency: sum of runtimes on critical path + network hop per cut edge ──
 	latency := 0.0
 	critPath := a.CriticalPath()
-	for _, f := range critPath {
-		latency += float64(f.RuntimeMs())
-	}
-	for i := 0; i < len(critPath)-1; i++ {
-		parent := critPath[i]
-		child := critPath[i+1]
-		pg := funcToGroup[parent.ID]
-		cg := funcToGroup[child.ID]
-		if pg != nil && cg != nil && pg.ID() != cg.ID() {
-			latency += float64(a.NetworkHopMS)
+	if len(critPath) > 0 {
+		for _, f := range critPath {
+			latency += float64(f.RuntimeMs())
+		}
+		for i := 0; i < len(critPath)-1; i++ {
+			parent := critPath[i]
+			child := critPath[i+1]
+			pg := funcToGroup[parent.ID]
+			cg := funcToGroup[child.ID]
+			if pg != nil && cg != nil && pg.ID() != cg.ID() {
+				latency += float64(a.NetworkHopMS)
+			}
 		}
 	}
+
+	latOK := len(critPath) == 0 || latency <= float64(a.MaxLatencyMS)
 
 	// ── Feasibility ──────────────────────────────────────────────────────────
 	memOK := true
@@ -284,7 +288,6 @@ func (a *Application) CalculateMetrics(groups [][]*LambdaFunction) Metrics {
 			break
 		}
 	}
-	latOK := latency <= float64(a.MaxLatencyMS)
 
 	return Metrics{
 		TotalCostUSD: totalCost,

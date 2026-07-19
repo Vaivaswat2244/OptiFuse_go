@@ -50,30 +50,55 @@ func (s *Singleton) Name() string { return "Singleton" }
 func (s *Singleton) Optimize(app *domain.Application) AlgorithmResult {
 	start := time.Now()
 
-	// BFS from root to get topological order.
-	// Python:
-	//   q = [app.root_function]
-	//   visited = {app.root_function.id}
-	//   while head < len(q): ...
-	root := app.RootFunction()
-	queue := []*domain.LambdaFunction{root}
-	visited := map[string]bool{root.ID: true}
-	ordered := make([]*domain.LambdaFunction, 0, len(app.Functions))
+	// If there are no edges (no topology defined), just put all functions
+	// in one group directly — BFS from root won't work since no parent/child
+	// relationships exist.
+	hasEdges := false
+	for _, f := range app.Functions {
+		if len(f.Children) > 0 {
+			hasEdges = true
+			break
+		}
+	}
 
-	head := 0
-	for head < len(queue) {
-		node := queue[head]
-		head++
-		ordered = append(ordered, node)
-		for _, child := range node.Children {
-			if !visited[child.ID] {
-				visited[child.ID] = true
-				queue = append(queue, child)
+	var ordered []*domain.LambdaFunction
+
+	if !hasEdges {
+		// No topology — include all functions directly.
+		ordered = make([]*domain.LambdaFunction, len(app.Functions))
+		copy(ordered, app.Functions)
+	} else {
+		// BFS from root.
+		root := app.RootFunction()
+		queue := []*domain.LambdaFunction{root}
+		visited := map[string]bool{root.ID: true}
+		ordered = make([]*domain.LambdaFunction, 0, len(app.Functions))
+
+		head := 0
+		for head < len(queue) {
+			node := queue[head]
+			head++
+			ordered = append(ordered, node)
+			for _, child := range node.Children {
+				if !visited[child.ID] {
+					visited[child.ID] = true
+					queue = append(queue, child)
+				}
+			}
+		}
+
+		// Catch any functions not reachable from root (disconnected nodes).
+		reachable := map[string]bool{}
+		for _, f := range ordered {
+			reachable[f.ID] = true
+		}
+		for _, f := range app.Functions {
+			if !reachable[f.ID] {
+				ordered = append(ordered, f)
 			}
 		}
 	}
 
-	// One group containing all functions in BFS order.
 	groups := [][]*domain.LambdaFunction{ordered}
 
 	return AlgorithmResult{
