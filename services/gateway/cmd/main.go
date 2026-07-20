@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 
@@ -10,44 +10,47 @@ import (
 	"github.com/Vaivaswat2244/OptiFuse_go/services/gateway/internal/db"
 	"github.com/Vaivaswat2244/OptiFuse_go/services/gateway/internal/grpcclient"
 	"github.com/Vaivaswat2244/OptiFuse_go/services/gateway/internal/handlers"
+	"github.com/Vaivaswat2244/OptiFuse_go/shared/logger"
 	"github.com/gin-gonic/gin"
 )
 
+var log *slog.Logger
+
 func main() {
+	log = logger.New("gateway")
 	ctx := context.Background()
 
-	// ── Database ──────────────────────────────────────────────────────────────
 	database, err := db.New(ctx, mustEnv("DATABASE_URL"))
 	if err != nil {
-		log.Fatalf("failed to connect to database: %v", err)
+		log.Error("failed to connect to database", "error", err)
+		os.Exit(1)
 	}
 	defer database.Close()
-	log.Println("✓ connected to database")
+	log.Info("connected to database")
 
-	// ── gRPC clients ──────────────────────────────────────────────────────────
 	clients, err := grpcclient.New()
 	if err != nil {
-		log.Fatalf("failed to connect to internal services: %v", err)
+		log.Error("failed to connect to internal services", "error", err)
+		os.Exit(1)
 	}
-	log.Println("✓ connected to internal services")
+	log.Info("connected to internal services",
+		"parser", os.Getenv("PARSER_ADDR"),
+		"enricher", os.Getenv("ENRICHER_ADDR"),
+		"optimizer", os.Getenv("OPTIMIZER_ADDR"),
+	)
 
-	// ── Gin router ────────────────────────────────────────────────────────────
 	r := gin.Default()
-
-	// CORS — allow the Next.js frontend origin.
 	r.Use(corsMiddleware())
+	r.Use(requestLogger())
 
-	// Health check — used by Kubernetes liveness probe.
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
 
 	api := r.Group("/api")
 	{
-		// ── Public routes (no auth required) ─────────────────────────────────
 		api.POST("/auth/github/", handlers.GitHubLogin(database))
 
-		// ── Authenticated routes ──────────────────────────────────────────────
 		authed := api.Group("/")
 		authed.Use(auth.TokenAuth(database))
 		{
@@ -63,9 +66,23 @@ func main() {
 	if port == "" {
 		port = "8080"
 	}
-	log.Printf("✓ gateway listening on :%s", port)
+	log.Info("gateway started", "port", port)
 	if err := r.Run(":" + port); err != nil {
-		log.Fatalf("server error: %v", err)
+		log.Error("server error", "error", err)
+		os.Exit(1)
+	}
+}
+
+// requestLogger logs every incoming HTTP request.
+func requestLogger() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Next()
+		log.Info("request",
+			"method", c.Request.Method,
+			"path", c.Request.URL.Path,
+			"status", c.Writer.Status(),
+			"ip", c.ClientIP(),
+		)
 	}
 }
 
@@ -89,7 +106,8 @@ func corsMiddleware() gin.HandlerFunc {
 func mustEnv(key string) string {
 	v := os.Getenv(key)
 	if v == "" {
-		log.Fatalf("required env var %s is not set", key)
+		log.Error("required env var not set", "key", key)
+		os.Exit(1)
 	}
 	return v
 }

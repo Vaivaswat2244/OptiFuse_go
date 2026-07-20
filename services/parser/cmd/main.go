@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"net"
 	"os"
 
@@ -10,20 +10,43 @@ import (
 
 	pb "github.com/Vaivaswat2244/OptiFuse_go/proto"
 	parser "github.com/Vaivaswat2244/OptiFuse_go/services/parser/internal"
+	"github.com/Vaivaswat2244/OptiFuse_go/shared/logger"
 )
+
+var log *slog.Logger
 
 type server struct {
 	pb.UnimplementedParserServiceServer
 }
 
 func (s *server) Parse(ctx context.Context, req *pb.ParseRequest) (*pb.ParseResponse, error) {
-	log.Printf("🔥 Parser ACTIVATED: Received simulation request!")
+	log.Info("parse request received", "repo", req.RepoName)
+
 	parsed, err := parser.Parse(req.RepoName, req.YamlContent)
 	if err != nil {
+		log.Error("parse failed", "repo", req.RepoName, "error", err)
 		return nil, err
 	}
 
-	// Convert ParsedGraph → proto Graph
+	log.Info("parse complete",
+		"repo", req.RepoName,
+		"functions", len(parsed.Functions),
+		"critical_path", parsed.CriticalPath,
+		"max_memory_mb", parsed.MaxMemoryMB,
+		"max_latency_ms", parsed.MaxLatencyMS,
+		"network_hop_ms", parsed.NetworkHopMS,
+		"warnings", parsed.Warnings,
+	)
+
+	for _, f := range parsed.Functions {
+		log.Debug("parsed function",
+			"id", f.ID,
+			"memory_mb", f.MemoryMB,
+			"timeout_sec", f.TimeoutSec,
+			"children", len(f.DataOutBytes),
+		)
+	}
+
 	nodes := make(map[string]*pb.FunctionNode, len(parsed.Functions))
 	for _, f := range parsed.Functions {
 		nodes[f.ID] = &pb.FunctionNode{
@@ -39,7 +62,6 @@ func (s *server) Parse(ctx context.Context, req *pb.ParseRequest) (*pb.ParseResp
 		}
 	}
 
-	// Build edge list from DataOutBytes on each node
 	var edges []*pb.Edge
 	for _, f := range parsed.Functions {
 		for childID, bytes := range f.DataOutBytes {
@@ -54,25 +76,27 @@ func (s *server) Parse(ctx context.Context, req *pb.ParseRequest) (*pb.ParseResp
 		}
 	}
 
-	graph := &pb.Graph{
-		Name:         parsed.Name,
-		Nodes:        nodes,
-		Edges:        edges,
-		CriticalPath: parsed.CriticalPath,
-		Constraints: &pb.Constraints{
-			MaxMemoryMb:  int32(parsed.MaxMemoryMB),
-			MaxLatencyMs: int32(parsed.MaxLatencyMS),	
-			NetworkHopMs: int32(parsed.NetworkHopMS),
-		},
-	}
+	log.Info("graph built", "nodes", len(nodes), "edges", len(edges))
 
 	return &pb.ParseResponse{
-		Graph:    graph,
+		Graph: &pb.Graph{
+			Name:         parsed.Name,
+			Nodes:        nodes,
+			Edges:        edges,
+			CriticalPath: parsed.CriticalPath,
+			Constraints: &pb.Constraints{
+				MaxMemoryMb:  int32(parsed.MaxMemoryMB),
+				MaxLatencyMs: int32(parsed.MaxLatencyMS),
+				NetworkHopMs: int32(parsed.NetworkHopMS),
+			},
+		},
 		Warnings: parsed.Warnings,
 	}, nil
 }
 
 func main() {
+	log = logger.New("parser")
+
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "50051"
@@ -80,14 +104,16 @@ func main() {
 
 	lis, err := net.Listen("tcp", ":"+port)
 	if err != nil {
-		log.Fatalf("failed to listen on port %s: %v", port, err)
+		log.Error("failed to listen", "port", port, "error", err)
+		os.Exit(1)
 	}
 
 	s := grpc.NewServer()
 	pb.RegisterParserServiceServer(s, &server{})
 
-	log.Printf("✓ parser service listening on :%s", port)
+	log.Info("parser service started", "port", port)
 	if err := s.Serve(lis); err != nil {
-		log.Fatalf("failed to serve: %v", err)
+		log.Error("server error", "error", err)
+		os.Exit(1)
 	}
 }

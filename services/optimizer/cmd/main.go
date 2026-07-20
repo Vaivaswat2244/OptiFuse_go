@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"net"
 	"os"
 	"time"
@@ -12,21 +12,39 @@ import (
 	pb "github.com/Vaivaswat2244/OptiFuse_go/proto"
 	"github.com/Vaivaswat2244/OptiFuse_go/services/optimizer/internal/algo"
 	"github.com/Vaivaswat2244/OptiFuse_go/services/optimizer/internal/domain"
+	"github.com/Vaivaswat2244/OptiFuse_go/shared/logger"
 )
+
+var log *slog.Logger
 
 type server struct {
 	pb.UnimplementedOptimizerServiceServer
 }
 
 func (s *server) Optimize(ctx context.Context, req *pb.OptimizeRequest) (*pb.OptimizeResponse, error) {
-	// Convert proto Graph → domain.Application
-	log.Printf("🔥 OPTIMIZER ACTIVATED: Received simulation request!")
 	app, err := graphToApp(req.Graph)
 	if err != nil {
+		log.Error("failed to convert graph to app", "error", err)
 		return nil, err
 	}
 
-	// Run all 6 algorithms
+	log.Info("optimization started",
+		"app", app.Name,
+		"functions", len(app.Functions),
+		"max_memory_mb", app.MaxMemoryMB,
+		"max_latency_ms", app.MaxLatencyMS,
+		"critical_path", app.CriticalPathIDs,
+	)
+
+	for _, f := range app.Functions {
+		log.Debug("function node",
+			"id", f.ID,
+			"memory_mb", f.MemoryMB,
+			"runtime_ms", f.RuntimeMs(),
+			"children", len(f.Children),
+		)
+	}
+
 	optimizers := []algo.Optimizer{
 		&algo.NoFusion{},
 		&algo.Singleton{},
@@ -40,9 +58,20 @@ func (s *server) Optimize(ctx context.Context, req *pb.OptimizeRequest) (*pb.Opt
 	var bestResult *pb.AlgorithmResult
 
 	for _, o := range optimizers {
+		algoStart := time.Now()
 		r := o.Optimize(app)
+		elapsed := time.Since(algoStart)
 
-		// Convert groups [][]*domain.LambdaFunction → []*pb.FusionGroup
+		log.Info("algorithm completed",
+			"algorithm", r.Name,
+			"feasible", r.Metrics.Feasible,
+			"cost_usd", r.Metrics.TotalCostUSD,
+			"latency_ms", r.Metrics.LatencyMS,
+			"groups", len(r.Groups),
+			"wall_clock_ms", elapsed.Milliseconds(),
+			"error", r.Error,
+		)
+
 		var fusionGroups []*pb.FusionGroup
 		for _, g := range r.Groups {
 			ids := make([]string, len(g))
@@ -76,7 +105,6 @@ func (s *server) Optimize(ctx context.Context, req *pb.OptimizeRequest) (*pb.Opt
 		}
 		results = append(results, pbResult)
 
-		// Track best: feasible + lowest cost
 		if r.Metrics.Feasible && r.Error == "" {
 			if bestResult == nil || r.Metrics.TotalCostUSD < bestResult.Metrics.TotalCostUsd {
 				bestResult = pbResult
@@ -84,13 +112,50 @@ func (s *server) Optimize(ctx context.Context, req *pb.OptimizeRequest) (*pb.Opt
 		}
 	}
 
-	plan := &pb.OptimizationPlan{
-		Results:     results,
-		Recommended: bestResult,
+	log.Info("optimization complete",
+		"total_algorithms", len(results),
+		"best", func() string {
+			if bestResult != nil {
+				return bestResult.Name
+			}
+			return "none"
+		}(),
+	)
+
+	return &pb.OptimizeResponse{
+		Plan: &pb.OptimizationPlan{
+			Results:     results,
+			Recommended: bestResult,
+		},
+	}, nil
+}
+
+func main() {
+	log = logger.New("optimizer")
+
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "50053"
 	}
 
-	return &pb.OptimizeResponse{Plan: plan}, nil
+	lis, err := net.Listen("tcp", ":"+port)
+	if err != nil {
+		log.Error("failed to listen", "port", port, "error", err)
+		os.Exit(1)
+	}
+
+	s := grpc.NewServer()
+	pb.RegisterOptimizerServiceServer(s, &server{})
+
+	log.Info("optimizer service started", "port", port)
+	if err := s.Serve(lis); err != nil {
+		log.Error("server error", "error", err)
+		os.Exit(1)
+	}
 }
+
+// suppress unused import if time is not used elsewhere
+var _ = time.Now
 
 // graphToApp converts a proto Graph into a domain.Application
 // that the algorithms can work with.
@@ -157,26 +222,3 @@ func graphToApp(g *pb.Graph) (*domain.Application, error) {
 		NetworkHopMS:    int(c.NetworkHopMs),
 	}, nil
 }
-
-func main() {
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "50053"
-	}
-
-	lis, err := net.Listen("tcp", ":"+port)
-	if err != nil {
-		log.Fatalf("failed to listen on port %s: %v", port, err)
-	}
-
-	s := grpc.NewServer()
-	pb.RegisterOptimizerServiceServer(s, &server{})
-
-	log.Printf("✓ optimizer service listening on :%s", port)
-	if err := s.Serve(lis); err != nil {
-		log.Fatalf("failed to serve: %v", err)
-	}
-}
-
-// suppress unused import if time is not used elsewhere
-var _ = time.Now
