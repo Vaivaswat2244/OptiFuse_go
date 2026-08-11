@@ -74,9 +74,14 @@ func (x *ParseRequest) GetYamlContent() []byte {
 }
 
 type ParseResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Graph         *Graph                 `protobuf:"bytes,1,opt,name=graph,proto3" json:"graph,omitempty"`
-	Warnings      []string               `protobuf:"bytes,2,rep,name=warnings,proto3" json:"warnings,omitempty"` // non-fatal issues (e.g. missing topology block)
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	Graph    *Graph                 `protobuf:"bytes,1,opt,name=graph,proto3" json:"graph,omitempty"`
+	Warnings []string               `protobuf:"bytes,2,rep,name=warnings,proto3" json:"warnings,omitempty"` // non-fatal issues (e.g. missing topology block)
+	// The `service:` field from serverless.yml. This is what CloudWatch log group
+	// names are built from (/aws/lambda/{service_name}-{stage}-{fn}), and it is
+	// frequently NOT the same as the GitHub repo name — so the enricher must use
+	// this rather than repo_name. Empty if the YAML omits `service:`.
+	ServiceName   string `protobuf:"bytes,3,opt,name=service_name,json=serviceName,proto3" json:"service_name,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -123,6 +128,13 @@ func (x *ParseResponse) GetWarnings() []string {
 		return x.Warnings
 	}
 	return nil
+}
+
+func (x *ParseResponse) GetServiceName() string {
+	if x != nil {
+		return x.ServiceName
+	}
+	return ""
 }
 
 type EnrichRequest struct {
@@ -435,10 +447,11 @@ const file_proto_services_proto_rawDesc = "" +
 	"\x14proto/services.proto\x12\x14optifuse.services.v1\x1a\x11proto/graph.proto\x1a\x15proto/optimizer.proto\"N\n" +
 	"\fParseRequest\x12\x1b\n" +
 	"\trepo_name\x18\x01 \x01(\tR\brepoName\x12!\n" +
-	"\fyaml_content\x18\x02 \x01(\fR\vyamlContent\"[\n" +
+	"\fyaml_content\x18\x02 \x01(\fR\vyamlContent\"~\n" +
 	"\rParseResponse\x12.\n" +
 	"\x05graph\x18\x01 \x01(\v2\x18.optifuse.graph.v1.GraphR\x05graph\x12\x1a\n" +
-	"\bwarnings\x18\x02 \x03(\tR\bwarnings\"\xdb\x01\n" +
+	"\bwarnings\x18\x02 \x03(\tR\bwarnings\x12!\n" +
+	"\fservice_name\x18\x03 \x01(\tR\vserviceName\"\xdb\x01\n" +
 	"\rEnrichRequest\x12.\n" +
 	"\x05graph\x18\x01 \x01(\v2\x18.optifuse.graph.v1.GraphR\x05graph\x12\x19\n" +
 	"\brole_arn\x18\x02 \x01(\tR\aroleArn\x12\x1f\n" +

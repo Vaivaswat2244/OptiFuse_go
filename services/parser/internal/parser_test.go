@@ -1,20 +1,88 @@
 package parser_test
 
 import (
-	"os"
 	"testing"
 
 	parser "github.com/Vaivaswat2244/OptiFuse_go/services/parser/internal"
 )
 
-// loadExample reads the shared example serverless.yml used across all tests.
+// exampleYAML is the "image processing" application used throughout OptiFuse.
+// services/optimizer/internal/algo/algo_test.go builds the same graph in Go, and
+// optifuse-image-processing-test carries the same custom.optifuse block — keep
+// the three in sync.
+//
+//	upload ─┬─► resize ────► watermark ─┐
+//	        │                            ├─► store
+//	        └─► filter ────► optimize ──┘
+const exampleYAML = `
+service: optifuse-image-processing
+
+provider:
+  name: aws
+  runtime: nodejs18.x
+  region: ap-south-1
+
+functions:
+  upload:
+    handler: handler.upload
+    memorySize: 256
+  resize:
+    handler: handler.resize
+    memorySize: 512
+  filter:
+    handler: handler.filter
+    memorySize: 512
+  watermark:
+    handler: handler.watermark
+    memorySize: 256
+  optimize:
+    handler: handler.optimize
+    memorySize: 512
+  store:
+    handler: handler.store
+    memorySize: 128
+
+custom:
+  optifuse:
+    topology:
+      upload:
+        children:
+          resize: 5242880
+          filter: 5242880
+      resize:
+        children:
+          watermark: 2097152
+      filter:
+        children:
+          optimize: 3145728
+      watermark:
+        children:
+          store: 2097152
+      optimize:
+        children:
+          store: 1048576
+    criticalPath:
+      - upload
+      - resize
+      - watermark
+      - store
+    functions:
+      upload:    { avgDurationMs: 100 }
+      resize:    { avgDurationMs: 300 }
+      filter:    { avgDurationMs: 250 }
+      watermark: { avgDurationMs: 150 }
+      optimize:  { avgDurationMs: 200 }
+      store:     { avgDurationMs: 80 }
+    constraints:
+      maxMemoryMB: 1024
+      maxLatencyMS: 700
+      networkHopMS: 10
+`
+
+// loadExample returns the shared example serverless.yml used across all tests.
 func loadExample(t *testing.T) []byte {
 	t.Helper()
-	b, err := os.ReadFile("../../../examples/serverless.yml")
-	if err != nil {
-		t.Fatalf("could not read example YAML: %v", err)
-	}
-	return b
+	return []byte(exampleYAML)
 }
 
 func TestParse_FunctionCount(t *testing.T) {
@@ -122,6 +190,59 @@ func TestParse_Constraints(t *testing.T) {
 	}
 	if graph.NetworkHopMS != 10 {
 		t.Errorf("NetworkHopMS: want 10, got %d", graph.NetworkHopMS)
+	}
+}
+
+func TestParse_ServiceName(t *testing.T) {
+	// The repo name and the YAML `service:` field are different things; the
+	// enricher builds CloudWatch log group names from the latter.
+	graph, err := parser.Parse("image-processor", loadExample(t))
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	if graph.ServiceName != "optifuse-image-processing" {
+		t.Errorf("ServiceName: want %q, got %q", "optifuse-image-processing", graph.ServiceName)
+	}
+	if graph.Name != "image-processor" {
+		t.Errorf("Name should stay the repo name, got %q", graph.Name)
+	}
+}
+
+func TestParse_DurationEstimates(t *testing.T) {
+	graph, err := parser.Parse("image-processor", loadExample(t))
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	want := map[string]float64{
+		"upload": 100, "resize": 300, "filter": 250,
+		"watermark": 150, "optimize": 200, "store": 80,
+	}
+	for _, f := range graph.Functions {
+		if got := f.AvgDurationMs; got != want[f.ID] {
+			t.Errorf("%s: expected avgDurationMs %.0f, got %.0f", f.ID, want[f.ID], got)
+		}
+	}
+}
+
+func TestParse_DurationEstimatesOptional(t *testing.T) {
+	// Omitting the estimates must leave AvgDurationMs at zero so the optimizer
+	// falls back to the timeout, rather than producing a bogus runtime.
+	yaml := []byte(`
+service: no-estimates
+provider:
+  name: aws
+  memorySize: 512
+  timeout: 3
+functions:
+  hello:
+    handler: src/hello.handler
+`)
+	graph, err := parser.Parse("no-estimates", yaml)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if graph.Functions[0].AvgDurationMs != 0 {
+		t.Errorf("expected AvgDurationMs 0 when unspecified, got %.0f", graph.Functions[0].AvgDurationMs)
 	}
 }
 

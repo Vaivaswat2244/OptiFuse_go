@@ -30,6 +30,7 @@ func (s *server) Parse(ctx context.Context, req *pb.ParseRequest) (*pb.ParseResp
 
 	log.Info("parse complete",
 		"repo", req.RepoName,
+		"service", parsed.ServiceName,
 		"functions", len(parsed.Functions),
 		"critical_path", parsed.CriticalPath,
 		"max_memory_mb", parsed.MaxMemoryMB,
@@ -59,6 +60,10 @@ func (s *server) Parse(ctx context.Context, req *pb.ParseRequest) (*pb.ParseResp
 			Environment:  f.Environment,
 			DataOutBytes: f.DataOutBytes,
 			LoadFactor:   1.0,
+			// Estimates from custom.optifuse.functions. The enricher overwrites
+			// these per-function when real CloudWatch data exists.
+			AvgDurationMs:   f.AvgDurationMs,
+			InvocationCount: f.InvocationCount,
 		}
 	}
 
@@ -90,7 +95,8 @@ func (s *server) Parse(ctx context.Context, req *pb.ParseRequest) (*pb.ParseResp
 				NetworkHopMs: int32(parsed.NetworkHopMS),
 			},
 		},
-		Warnings: parsed.Warnings,
+		Warnings:    parsed.Warnings,
+		ServiceName: parsed.ServiceName,
 	}, nil
 }
 

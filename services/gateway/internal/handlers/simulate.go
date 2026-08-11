@@ -57,7 +57,7 @@ func LiveSimulate(database *db.Pool, clients *grpcclient.Clients) gin.HandlerFun
 		defer cancel()
 
 		// Step 2: Parse YAML → Graph.
-		graph, warnings, err := clients.Parser.Parse(ctx, body.RepoName, yamlContent)
+		graph, serviceName, warnings, err := clients.Parser.Parse(ctx, body.RepoName, yamlContent)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{
 				"error":   "failed to parse serverless.yml",
@@ -70,9 +70,16 @@ func LiveSimulate(database *db.Pool, clients *grpcclient.Clients) gin.HandlerFun
 		// If not configured, we proceed with zero-value telemetry — algorithms
 		// still work, they just use YAML-derived values instead of real metrics.
 		if profile.AWSRoleARN != "" {
+			// Log groups are /aws/lambda/{service}-{stage}-{fn}, built from the
+			// YAML's `service:` field — which is often not the repo name.
+			// Fall back to the repo name only if the YAML omits `service:`.
+			if serviceName == "" {
+				serviceName = body.RepoName
+			}
+
 			enriched, err := clients.Enricher.Enrich(ctx, graph,
 				profile.AWSRoleARN, profile.AWSExternalID,
-				body.RepoName, "dev",
+				serviceName, "dev",
 			)
 			if err != nil {
 				// Enrichment failure is non-fatal — log and continue with base graph.

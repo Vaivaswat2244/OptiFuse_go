@@ -48,6 +48,22 @@ type OptiFuseConfig struct {
 	Topology     map[string]TopologyNode `yaml:"topology"`
 	CriticalPath []string                `yaml:"criticalPath"`
 	Constraints  ConstraintSpec          `yaml:"constraints"`
+
+	// Functions holds per-function runtime estimates, keyed by function ID.
+	// These stand in for CloudWatch telemetry when the app has no traffic yet.
+	Functions map[string]FunctionEstimate `yaml:"functions"`
+}
+
+// FunctionEstimate is a hand-supplied stand-in for enricher telemetry.
+//
+// Without it the only runtime signal available from YAML is `timeout`, which is
+// in whole seconds and defaults to 30 — two orders of magnitude above a typical
+// Lambda duration, which distorts every cost and latency figure. These values
+// land on FunctionNode.avg_duration_ms, the same field the enricher writes, so
+// real CloudWatch data transparently supersedes them per-function once it exists.
+type FunctionEstimate struct {
+	AvgDurationMs   float64 `yaml:"avgDurationMs"`
+	InvocationCount int64   `yaml:"invocationCount"`
 }
 
 type TopologyNode struct {
@@ -75,11 +91,20 @@ type ParsedFunction struct {
 	Environment map[string]string
 	// DataOutBytes: child function ID → bytes transferred
 	DataOutBytes map[string]int64
+
+	// Runtime estimates from custom.optifuse.functions. Zero means "not supplied";
+	// the optimizer then falls back to TimeoutSec.
+	AvgDurationMs   float64
+	InvocationCount int64
 }
 
 // ParsedGraph is the output of the parser — ready to be converted to the Graph proto.
 type ParsedGraph struct {
-	Name         string
+	Name string
+	// ServiceName is the `service:` field from serverless.yml. It differs from
+	// Name (the repo name) often enough to matter: CloudWatch log groups are
+	// /aws/lambda/{service}-{stage}-{fn}, so the enricher needs this, not the repo.
+	ServiceName  string
 	Functions    []*ParsedFunction
 	CriticalPath []string
 	MaxMemoryMB  int
@@ -131,15 +156,20 @@ func Parse(repoName string, yamlContent []byte) (*ParsedGraph, error) {
 			rt = defaultRuntime
 		}
 
+		// Optional runtime estimate from custom.optifuse.functions.
+		est := spec.Custom.OptiFuse.Functions[id]
+
 		funcsMap[id] = &ParsedFunction{
-			ID:           id,
-			Name:         id,
-			MemoryMB:     mem,
-			TimeoutSec:   timeout,
-			Handler:      props.Handler,
-			Runtime:      rt,
-			Environment:  props.Environment,
-			DataOutBytes: make(map[string]int64),
+			ID:              id,
+			Name:            id,
+			MemoryMB:        mem,
+			TimeoutSec:      timeout,
+			Handler:         props.Handler,
+			Runtime:         rt,
+			Environment:     props.Environment,
+			DataOutBytes:    make(map[string]int64),
+			AvgDurationMs:   est.AvgDurationMs,
+			InvocationCount: est.InvocationCount,
 		}
 	}
 
@@ -204,6 +234,7 @@ func Parse(repoName string, yamlContent []byte) (*ParsedGraph, error) {
 
 	graph := &ParsedGraph{
 		Name:         repoName,
+		ServiceName:  spec.Service,
 		Functions:    funcs,
 		CriticalPath: spec.Custom.OptiFuse.CriticalPath,
 		MaxMemoryMB:  maxMem,

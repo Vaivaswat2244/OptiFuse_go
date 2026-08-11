@@ -20,16 +20,17 @@ func NewParserClient(conn *grpc.ClientConn) *ParserClient {
 }
 
 // Parse sends serverless.yml bytes to the parser service.
-// Returns the parsed Graph proto and any warnings.
-func (p *ParserClient) Parse(ctx context.Context, repoName string, yamlContent []byte) (*pb.Graph, []string, error) {
+// Returns the parsed Graph proto, the YAML's `service:` name (needed by the
+// enricher to build CloudWatch log group names), and any warnings.
+func (p *ParserClient) Parse(ctx context.Context, repoName string, yamlContent []byte) (*pb.Graph, string, []string, error) {
 	resp, err := p.client.Parse(ctx, &pb.ParseRequest{
 		RepoName:    repoName,
 		YamlContent: yamlContent,
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("parser.Parse: %w", err)
+		return nil, "", nil, fmt.Errorf("parser.Parse: %w", err)
 	}
-	return resp.Graph, resp.Warnings, nil
+	return resp.Graph, resp.ServiceName, resp.Warnings, nil
 }
 
 // ── Enricher client ───────────────────────────────────────────────────────────

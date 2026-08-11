@@ -20,6 +20,12 @@ message ParseRequest {
 message ParseResponse {
   optifuse.graph.v1.Graph graph = 1;
   repeated string warnings      = 2;  // non-fatal issues (e.g. missing topology block)
+
+  // The `service:` field from serverless.yml. This is what CloudWatch log group
+  // names are built from (/aws/lambda/{service_name}-{stage}-{fn}), and it is
+  // frequently NOT the same as the GitHub repo name — so the enricher must use
+  // this rather than repo_name. Empty if the YAML omits `service:`.
+  string service_name = 3;
 }
 
 service ParserService {
