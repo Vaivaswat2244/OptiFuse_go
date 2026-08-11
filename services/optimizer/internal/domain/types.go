@@ -185,16 +185,20 @@ func (a *Application) FunctionsMap() map[string]*LambdaFunction {
 	return m
 }
 
-// RootFunction returns the function with no parent.
+// RootFunction returns the function with no parent, or nil if there isn't one.
 // Python: @property def root_function(self) -> LambdaFunction
-// Panics if no root exists — the parser guarantees exactly one root.
+//
+// A rootless graph is reachable from a hand-written custom.optifuse.topology
+// that forms a cycle, so this returns nil rather than panicking — callers decide
+// how to degrade. Where more than one function is parentless, the first in
+// Application.Functions order wins (critical path first, see graphToApp).
 func (a *Application) RootFunction() *LambdaFunction {
 	for _, f := range a.Functions {
 		if f.Parent == nil {
 			return f
 		}
 	}
-	panic("application has no root function — invalid graph")
+	return nil
 }
 
 // CriticalPath returns the ordered slice of LambdaFunction pointers on the critical path.

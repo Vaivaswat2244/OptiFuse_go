@@ -52,7 +52,8 @@ func (s *Singleton) Optimize(app *domain.Application) AlgorithmResult {
 
 	// If there are no edges (no topology defined), just put all functions
 	// in one group directly — BFS from root won't work since no parent/child
-	// relationships exist.
+	// relationships exist. Same fallback when the topology is cyclic and so has
+	// no root: the group contents are identical either way, only the order differs.
 	hasEdges := false
 	for _, f := range app.Functions {
 		if len(f.Children) > 0 {
@@ -61,15 +62,16 @@ func (s *Singleton) Optimize(app *domain.Application) AlgorithmResult {
 		}
 	}
 
+	root := app.RootFunction()
+
 	var ordered []*domain.LambdaFunction
 
-	if !hasEdges {
+	if !hasEdges || root == nil {
 		// No topology — include all functions directly.
 		ordered = make([]*domain.LambdaFunction, len(app.Functions))
 		copy(ordered, app.Functions)
 	} else {
 		// BFS from root.
-		root := app.RootFunction()
 		queue := []*domain.LambdaFunction{root}
 		visited := map[string]bool{root.ID: true}
 		ordered = make([]*domain.LambdaFunction, 0, len(app.Functions))

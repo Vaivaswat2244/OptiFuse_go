@@ -119,7 +119,16 @@ func (g *GreedyTP) Optimize(app *domain.Application) AlgorithmResult {
 	// ── Step 2: Build initial groups via BFS from barrier nodes ──────────────
 	// Barrier nodes: root + the "to" node of every initial cut.
 	// Python: initial_barrier_nodes = {app.root_function} | {child for _, child in initial_cuts}
-	barrierIDs := map[string]bool{app.RootFunction().ID: true}
+	root := app.RootFunction()
+	if root == nil {
+		return AlgorithmResult{
+			Name:        g.Name(),
+			Error:       "topology has no root function — check custom.optifuse.topology for a cycle",
+			WallClockMs: float64(time.Since(start).Microseconds()) / 1000.0,
+		}
+	}
+
+	barrierIDs := map[string]bool{root.ID: true}
 	for e := range initialCuts {
 		barrierIDs[e.to] = true
 	}
