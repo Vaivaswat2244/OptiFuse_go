@@ -44,7 +44,14 @@ services:
 
   # ── Enricher service ────────────────────────────────────────────────────────
   # Requires AWS read credentials (CloudWatch, X-Ray).
-  # Credentials are passed per-request as assumed-role ARN; no env vars needed.
+  #
+  # The customer's role ARN arrives per-request, but assuming it is itself an AWS
+  # call: LoadDefaultConfig -> sts:AssumeRole. Their trust policy names the
+  # OptiFuse service account as principal, so these must be THAT account's keys —
+  # the enricher has to authenticate as OptiFuse before it can borrow a customer
+  # role. With no credentials at all the SDK falls through to the EC2 instance
+  # metadata service, which does not exist in this container, and blocks for ~5s
+  # before failing with "no EC2 IMDS role found".
   enricher:
     build:
       context: .
@@ -52,6 +59,10 @@ services:
     networks: [optifuse]
     ports:
       - "50052:50052"
+    environment:
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_REGION=${AWS_REGION}
     healthcheck:
       test: ["CMD-SHELL", "nc -z 127.0.0.1 50052 || exit 1"]
       interval: 10s
@@ -59,7 +70,9 @@ services:
       retries: 3
 
   # ── Optimizer service ───────────────────────────────────────────────────────
-  # Stateless. No AWS credentials. Pure computation.
+  # Stateless. No AWS credentials — it never makes an AWS call, it only runs the
+  # algorithms and shells out to glpsol. Credentials used to be declared here and
+  # not on the enricher, which is exactly backwards.
   # Installs glpk-utils for the MtxILP algorithm.
   optimizer:
     build:
@@ -68,10 +81,6 @@ services:
     networks: [optifuse]
     ports:
       - "50053:50053"
-    environment:
-      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
-      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
-      - AWS_REGION=${AWS_REGION}
     healthcheck:
       test: ["CMD-SHELL", "nc -z 127.0.0.1 50053 || exit 1"]
       interval: 10s
