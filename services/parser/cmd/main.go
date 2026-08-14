@@ -31,6 +31,7 @@ func (s *server) Parse(ctx context.Context, req *pb.ParseRequest) (*pb.ParseResp
 	log.Info("parse complete",
 		"repo", req.RepoName,
 		"service", parsed.ServiceName,
+		"stage", parsed.Stage,
 		"functions", len(parsed.Functions),
 		"critical_path", parsed.CriticalPath,
 		"max_memory_mb", parsed.MaxMemoryMB,
@@ -97,6 +98,7 @@ func (s *server) Parse(ctx context.Context, req *pb.ParseRequest) (*pb.ParseResp
 		},
 		Warnings:    parsed.Warnings,
 		ServiceName: parsed.ServiceName,
+		Stage:       parsed.Stage,
 	}, nil
 }
 

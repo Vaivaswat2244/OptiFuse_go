@@ -208,6 +208,40 @@ func TestParse_ServiceName(t *testing.T) {
 	}
 }
 
+// Stage is the other half of the log group name, /aws/lambda/{service}-{stage}-{fn}.
+// It was hardcoded to "dev" in the gateway, which silently produced wrong log
+// group names — and so zero telemetry — for anyone deploying to another stage.
+func TestParse_StageDefaultsToDev(t *testing.T) {
+	// The example omits `provider.stage`, matching the Serverless default.
+	graph, err := parser.Parse("image-processor", loadExample(t))
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	if graph.Stage != "dev" {
+		t.Errorf("Stage: want %q when the YAML omits it, got %q", "dev", graph.Stage)
+	}
+}
+
+func TestParse_StageFromProvider(t *testing.T) {
+	const yml = `
+service: billing
+provider:
+  name: aws
+  runtime: nodejs18.x
+  stage: production
+functions:
+  charge:
+    handler: handler.charge
+`
+	graph, err := parser.Parse("billing-repo", []byte(yml))
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	if graph.Stage != "production" {
+		t.Errorf("Stage: want %q, got %q", "production", graph.Stage)
+	}
+}
+
 func TestParse_DurationEstimates(t *testing.T) {
 	graph, err := parser.Parse("image-processor", loadExample(t))
 	if err != nil {

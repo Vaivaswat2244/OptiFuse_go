@@ -23,6 +23,7 @@ type ProviderSpec struct {
 	Name       string `yaml:"name"`
 	Runtime    string `yaml:"runtime"`
 	Region     string `yaml:"region"`
+	Stage      string `yaml:"stage"`
 	MemorySize int    `yaml:"memorySize"`
 	Timeout    int    `yaml:"timeout"`
 }
@@ -104,7 +105,10 @@ type ParsedGraph struct {
 	// ServiceName is the `service:` field from serverless.yml. It differs from
 	// Name (the repo name) often enough to matter: CloudWatch log groups are
 	// /aws/lambda/{service}-{stage}-{fn}, so the enricher needs this, not the repo.
-	ServiceName  string
+	ServiceName string
+	// Stage is `provider.stage`, the other half of the log group name.
+	// Defaults to "dev", matching the Serverless Framework's own default.
+	Stage        string
 	Functions    []*ParsedFunction
 	CriticalPath []string
 	MaxMemoryMB  int
@@ -232,9 +236,15 @@ func Parse(repoName string, yamlContent []byte) (*ParsedGraph, error) {
 		}
 	}
 
+	stage := spec.Provider.Stage
+	if stage == "" {
+		stage = "dev"
+	}
+
 	graph := &ParsedGraph{
 		Name:         repoName,
 		ServiceName:  spec.Service,
+		Stage:        stage,
 		Functions:    funcs,
 		CriticalPath: spec.Custom.OptiFuse.CriticalPath,
 		MaxMemoryMB:  maxMem,

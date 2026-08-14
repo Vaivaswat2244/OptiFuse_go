@@ -26,6 +26,10 @@ message ParseResponse {
   // frequently NOT the same as the GitHub repo name — so the enricher must use
   // this rather than repo_name. Empty if the YAML omits `service:`.
   string service_name = 3;
+
+  // `provider.stage`, the other half of the log group name. "dev" when the YAML
+  // omits it, matching the Serverless Framework's own default.
+  string stage = 4;
 }
 
 service ParserService {

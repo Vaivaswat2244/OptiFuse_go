@@ -2,11 +2,21 @@ package handlers
 
 import (
 	"net/http"
+	"regexp"
+	"strings"
 
 	"github.com/Vaivaswat2244/OptiFuse_go/services/gateway/internal/auth"
 	"github.com/Vaivaswat2244/OptiFuse_go/services/gateway/internal/db"
 	"github.com/gin-gonic/gin"
 )
+
+// iamRoleARN matches an IAM role ARN, the only thing sts:AssumeRole accepts.
+//
+// The CloudFormation template we hand users creates the role and exposes it as
+// the stack's RoleArn output, but the console shows the *stack* ARN much more
+// prominently — so pasting the wrong one is the obvious mistake to make. It is
+// only caught at enrichment time, several layers away, as an opaque AWS 403.
+var iamRoleARN = regexp.MustCompile(`^arn:aws[a-z-]*:iam::\d{12}:role/.+`)
 
 // GetProfile handles GET /api/profile/settings/
 // Python: ProfileSettingsView.get()
@@ -43,7 +53,17 @@ func UpdateProfile(database *db.Pool) gin.HandlerFunc {
 			return
 		}
 
-		if err := database.UpdateAWSRoleARN(c.Request.Context(), user.ID, body.AWSRoleARN); err != nil {
+		arn := strings.TrimSpace(body.AWSRoleARN)
+		if !iamRoleARN.MatchString(arn) {
+			msg := "aws_role_arn must be an IAM role ARN, e.g. arn:aws:iam::123456789012:role/Optifuse-User-Access-Role"
+			if strings.HasPrefix(arn, "arn:aws:cloudformation:") {
+				msg = "that is the CloudFormation stack ARN — copy the stack's RoleArn output instead, which looks like arn:aws:iam::123456789012:role/Optifuse-User-Access-Role"
+			}
+			c.JSON(http.StatusBadRequest, gin.H{"error": msg})
+			return
+		}
+
+		if err := database.UpdateAWSRoleARN(c.Request.Context(), user.ID, arn); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update profile"})
 			return
 		}
