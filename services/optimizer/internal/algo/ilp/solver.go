@@ -1,5 +1,10 @@
-// Package ilp handles MPS/LP file generation and external solver invocation
-// for the MtxILP algorithm. It replaces PuLP + CBC from the Python implementation.
+// Package ilp handles LP file generation and external solver invocation for the
+// MtxILP algorithm. It replaces PuLP + CBC from the Python implementation.
+//
+// The file we emit is CPLEX LP format, because that is what `glpsol --lp` reads.
+// An earlier version wrote lp_solve syntax (`min: ...;`, semicolon-terminated
+// named constraints, `bin`/`end`) which glpsol rejected on line 1 with
+// "missing variable name" — MtxILP had therefore never produced a result.
 //
 // To add a new solver, implement the Solver interface and register it in Solve().
 package ilp
@@ -21,162 +26,287 @@ type Result struct {
 	Groups  [][]*domain.LambdaFunction
 }
 
-// Solve formulates the MtxILP problem for the given application,
-// writes an MPS file, invokes glpsol (or cbc), parses the solution,
-// and returns the resulting partition.
+// maxLineLen keeps emitted lines inside GLPK's LP reader limit of 255
+// characters. Newlines are whitespace within a statement, so wrapping an
+// expression across lines is safe.
+const maxLineLen = 200
+
+// term is one coefficient/variable pair in a linear expression.
+type term struct {
+	coef float64
+	name string
+}
+
+// expr is a linear expression that accumulates duplicate variables rather than
+// emitting them twice. CPLEX LP readers reject a variable appearing more than
+// once in the same constraint, which the memory constraint would otherwise do:
+// it references x[b,f] for every f (including f == b) and x[b,b] again for the
+// capacity term.
+type expr struct {
+	order []string
+	byVar map[string]float64
+}
+
+func newExpr() *expr {
+	return &expr{byVar: make(map[string]float64)}
+}
+
+func (e *expr) add(coef float64, name string) {
+	if coef == 0 {
+		return
+	}
+	if _, seen := e.byVar[name]; !seen {
+		e.order = append(e.order, name)
+	}
+	e.byVar[name] += coef
+}
+
+func (e *expr) terms() []term {
+	out := make([]term, 0, len(e.order))
+	for _, name := range e.order {
+		if c := e.byVar[name]; c != 0 {
+			out = append(out, term{c, name})
+		}
+	}
+	return out
+}
+
+func (e *expr) empty() bool { return len(e.terms()) == 0 }
+
+// writeStatement emits "<label> <terms> <suffix>", wrapping long expressions.
+func writeStatement(sb *strings.Builder, label string, terms []term, suffix string) {
+	line := " " + label
+	for i, t := range terms {
+		var chunk string
+		switch {
+		case i == 0 && t.coef < 0:
+			chunk = fmt.Sprintf(" -%s %s", formatCoef(-t.coef), t.name)
+		case i == 0:
+			chunk = fmt.Sprintf(" %s %s", formatCoef(t.coef), t.name)
+		case t.coef < 0:
+			chunk = fmt.Sprintf(" - %s %s", formatCoef(-t.coef), t.name)
+		default:
+			chunk = fmt.Sprintf(" + %s %s", formatCoef(t.coef), t.name)
+		}
+		if len(line)+len(chunk) > maxLineLen {
+			sb.WriteString(line + "\n")
+			line = "   "
+		}
+		line += chunk
+	}
+	sb.WriteString(line + suffix + "\n")
+}
+
+// formatCoef renders a coefficient in a form the LP reader accepts. %.12g keeps
+// small data-transfer costs (order 1e-9) from being flattened to zero.
+func formatCoef(c float64) string {
+	return strconv.FormatFloat(c, 'g', 12, 64)
+}
+
+// dirEdge is a directed call between two functions.
+type dirEdge struct{ u, v *domain.LambdaFunction }
+
+// buildLP returns the CPLEX LP model text and the edge list it was built from.
+//
+// Kept separate from Solve so the model can be checked without glpsol installed,
+// which is what the tests do — the previous format bug was in generation, not in
+// solving, and would have been caught by inspecting the emitted text.
+func buildLP(app *domain.Application) (string, []dirEdge) {
+	funcs := app.Functions
+	critPath := app.CriticalPath()
+
+	// ── Variable naming ───────────────────────────────────────────────────────
+	// x_<b>_<f> = 1 if function f is assigned to the group rooted at b
+	// c_<e>     = 1 if edge e is cut (its endpoints are in different groups)
+	//
+	// Indices rather than IDs deliberately. glpsol's printable solution reserves
+	// a 12-character column for the variable name and wraps onto the next line
+	// when it overflows, which a name like x_orderPlaced_processPayment does.
+	// Indices keep every name short, and sidestep escaping IDs entirely.
+	//
+	// Python: x = pulp.LpVariable.dicts("x", ((b.id, f.id) for b in roots for f in app.functions))
+	//         is_cut = pulp.LpVariable.dicts("is_cut", ((e[0].id, e[1].id) for e in all_edges))
+	idxOf := make(map[string]int, len(funcs))
+	for i, f := range funcs {
+		idxOf[f.ID] = i
+	}
+	xVar := func(b, f int) string { return fmt.Sprintf("x_%d_%d", b, f) }
+	cVar := func(e int) string { return fmt.Sprintf("c_%d", e) }
+
+	// Collect all directed edges, and index them so the latency constraint can
+	// refer to the same variable as the cut constraints.
+	var edges []dirEdge
+	edgeIdx := make(map[[2]string]int)
+	for _, u := range funcs {
+		for _, v := range u.Children {
+			if u.ID == v.ID {
+				continue // self-edge: never a cut
+			}
+			key := [2]string{u.ID, v.ID}
+			if _, dup := edgeIdx[key]; dup {
+				continue
+			}
+			edgeIdx[key] = len(edges)
+			edges = append(edges, dirEdge{u, v})
+		}
+	}
+
+	// With no edges there is nothing to optimize; Solve handles that case
+	// without a solver rather than emitting a degenerate model.
+	if len(edges) == 0 {
+		return "", nil
+	}
+
+	var sb strings.Builder
+	sb.WriteString("\\* OptiFuse fusion model *\\\n")
+
+	// ── Objective: minimize data transfer cost on cut edges ──────────────────
+	// Python: prob += lpSum(u.get_data_transfer_cost(v.id) * is_cut[u.id, v.id] for u, v in all_edges)
+	obj := newExpr()
+	for i, e := range edges {
+		obj.add(e.u.DataTransferCostUSD(e.v.ID), cVar(i))
+	}
+	sb.WriteString("Minimize\n")
+	if obj.empty() {
+		// Every edge carries zero bytes. Keep the model well-formed by scoring
+		// the first cut variable at zero rather than emitting a bare label.
+		writeStatement(&sb, "obj:", []term{{0, cVar(0)}}, "")
+	} else {
+		writeStatement(&sb, "obj:", obj.terms(), "")
+	}
+
+	sb.WriteString("Subject To\n")
+
+	// 1. Each function is assigned to exactly one group root.
+	// Python: for f in app.functions: prob += lpSum(x[b.id, f.id] for b in roots) == 1
+	for f := range funcs {
+		e := newExpr()
+		for b := range funcs {
+			e.add(1, xVar(b, f))
+		}
+		writeStatement(&sb, fmt.Sprintf("assign_%d:", f), e.terms(), " = 1")
+	}
+
+	// 2. Root integrity: x[b,f] <= x[b,b].
+	// Skipped when b == f, where it degenerates to 0 <= 0.
+	// Python: for b in roots: for f in app.functions: prob += x[b.id, f.id] <= x[b.id, b.id]
+	for b := range funcs {
+		for f := range funcs {
+			if b == f {
+				continue
+			}
+			e := newExpr()
+			e.add(1, xVar(b, f))
+			e.add(-1, xVar(b, b))
+			writeStatement(&sb, fmt.Sprintf("root_%d_%d:", b, f), e.terms(), " <= 0")
+		}
+	}
+
+	// 3. Memory per group: sum(mem[f] * x[b,f]) <= maxMemory * x[b,b].
+	// Python: prob += lpSum(f.memory * x[b.id, f.id] for f in app.functions) <= max_memory * x[b.id, b.id]
+	for b := range funcs {
+		e := newExpr()
+		for f, fn := range funcs {
+			e.add(float64(fn.MemoryMB), xVar(b, f))
+		}
+		e.add(-float64(app.MaxMemoryMB), xVar(b, b))
+		writeStatement(&sb, fmt.Sprintf("mem_%d:", b), e.terms(), " <= 0")
+	}
+
+	// 4. Cut definition: c[e] >= x[b,u] - x[b,v] and c[e] >= x[b,v] - x[b,u].
+	// Python: for u, v in all_edges: for b in roots:
+	//             prob += is_cut[u,v] >= x[b,u] - x[b,v]
+	//             prob += is_cut[u,v] >= x[b,v] - x[b,u]
+	for i, edge := range edges {
+		u, v := idxOf[edge.u.ID], idxOf[edge.v.ID]
+		for b := range funcs {
+			a := newExpr()
+			a.add(1, cVar(i))
+			a.add(-1, xVar(b, u))
+			a.add(1, xVar(b, v))
+			writeStatement(&sb, fmt.Sprintf("cutA_%d_%d:", i, b), a.terms(), " >= 0")
+
+			c := newExpr()
+			c.add(1, cVar(i))
+			c.add(1, xVar(b, u))
+			c.add(-1, xVar(b, v))
+			writeStatement(&sb, fmt.Sprintf("cutB_%d_%d:", i, b), c.terms(), " >= 0")
+		}
+	}
+
+	// 5. Latency on the critical path.
+	// Python: prob += runtime_sum + lpSum(hop_delay * is_cut[u,v] for cp_edges) <= max_latency
+	//
+	// Only consecutive pairs that are real edges get a term. A criticalPath
+	// naming functions that do not actually call each other would otherwise
+	// reference a variable declared nowhere else, which the reader treats as a
+	// fresh continuous variable — the constraint would then be satisfiable by
+	// setting it to zero and the latency budget silently ignored.
+	runtimeSum := 0
+	for _, f := range critPath {
+		runtimeSum += f.RuntimeMs()
+	}
+	lat := newExpr()
+	for i := 0; i < len(critPath)-1; i++ {
+		key := [2]string{critPath[i].ID, critPath[i+1].ID}
+		if ei, ok := edgeIdx[key]; ok {
+			lat.add(float64(app.NetworkHopMS), cVar(ei))
+		}
+	}
+	if !lat.empty() {
+		writeStatement(&sb, "latency:", lat.terms(),
+			fmt.Sprintf(" <= %d", app.MaxLatencyMS-runtimeSum))
+	}
+
+	// ── Binary declarations ───────────────────────────────────────────────────
+	sb.WriteString("Binary\n")
+	for b := range funcs {
+		for f := range funcs {
+			sb.WriteString(" " + xVar(b, f) + "\n")
+		}
+	}
+	for i := range edges {
+		sb.WriteString(" " + cVar(i) + "\n")
+	}
+	sb.WriteString("End\n")
+
+	return sb.String(), edges
+}
+
+// Solve formulates the MtxILP problem, writes a CPLEX LP file, invokes glpsol
+// (or cbc), parses the solution and returns the resulting partition.
 //
 // This is a direct translation of the PuLP model in optimal.py.
 func Solve(app *domain.Application) (*Result, error) {
 	fm := app.FunctionsMap()
 	funcs := app.Functions
-	critPath := app.CriticalPath()
 
-	// ── Variable naming ───────────────────────────────────────────────────────
-	// x[b,f] = 1 if function f is assigned to group rooted at b
-	// is_cut[u,v] = 1 if edge (u→v) is a cut (u and v in different groups)
-	//
-	// Python: x = pulp.LpVariable.dicts("x", ((b.id, f.id) for b in roots for f in app.functions))
-	//         is_cut = pulp.LpVariable.dicts("is_cut", ((e[0].id, e[1].id) for e in all_edges))
-
-	xVar := func(bID, fID string) string {
-		return fmt.Sprintf("x_%s_%s", sanitize(bID), sanitize(fID))
-	}
-	cutVar := func(uID, vID string) string {
-		return fmt.Sprintf("cut_%s_%s", sanitize(uID), sanitize(vID))
+	if len(funcs) == 0 {
+		return &Result{Optimal: true, Status: "OPTIMAL"}, nil
 	}
 
-	// Collect all directed edges.
-	type dirEdge struct{ u, v *domain.LambdaFunction }
-	var edges []dirEdge
-	for _, u := range funcs {
-		for _, v := range u.Children {
-			edges = append(edges, dirEdge{u, v})
+	lpText, edges := buildLP(app)
+
+	// No edges means every feasible partition scores zero, so singletons are as
+	// optimal as anything else.
+	if len(edges) == 0 {
+		groups := make([][]*domain.LambdaFunction, len(funcs))
+		for i, f := range funcs {
+			groups[i] = []*domain.LambdaFunction{f}
 		}
+		return &Result{Optimal: true, Status: "OPTIMAL (no edges)", Groups: groups}, nil
 	}
 
-	// ── Build LP in free MPS-like format using GLPK LP format ────────────────
-	// We use GLPK's LP format (simpler than MPS for hand-generation).
-	var sb strings.Builder
+	xVar := func(b, f int) string { return fmt.Sprintf("x_%d_%d", b, f) }
 
-	// Objective: minimize data transfer cost on cut edges
-	// Python: prob += lpSum(u.get_data_transfer_cost(v.id) * is_cut[u.id, v.id] for u, v in all_edges)
-	sb.WriteString("min: ")
-	terms := make([]string, 0, len(edges))
-	for _, e := range edges {
-		cost := e.u.DataTransferCostUSD(e.v.ID)
-		if cost > 0 {
-			terms = append(terms, fmt.Sprintf("%.10f %s", cost, cutVar(e.u.ID, e.v.ID)))
-		}
-	}
-	if len(terms) == 0 {
-		terms = []string{"0"}
-	}
-	sb.WriteString(strings.Join(terms, " + "))
-	sb.WriteString(";\n\n")
-
-	sb.WriteString("/* Constraints */\n\n")
-
-	// 1. Each function assigned to exactly one group root.
-	// Python: for f in app.functions: prob += lpSum(x[b.id, f.id] for b in roots) == 1
-	for _, f := range funcs {
-		parts := make([]string, 0, len(funcs))
-		for _, b := range funcs {
-			parts = append(parts, xVar(b.ID, f.ID))
-		}
-		sb.WriteString(fmt.Sprintf("assign_%s: %s = 1;\n", sanitize(f.ID), strings.Join(parts, " + ")))
-	}
-	sb.WriteString("\n")
-
-	// 2. Root integrity: x[b,f] ≤ x[b,b]
-	// Python: for b in roots: for f in app.functions: prob += x[b.id, f.id] <= x[b.id, b.id]
-	for _, b := range funcs {
-		for _, f := range funcs {
-			sb.WriteString(fmt.Sprintf(
-				"root_%s_%s: %s - %s <= 0;\n",
-				sanitize(b.ID), sanitize(f.ID),
-				xVar(b.ID, f.ID), xVar(b.ID, b.ID),
-			))
-		}
-	}
-	sb.WriteString("\n")
-
-	// 3. Memory constraint per group.
-	// Python: prob += lpSum(f.memory * x[b.id, f.id] for f in app.functions) <= max_memory * x[b.id, b.id]
-	for _, b := range funcs {
-		memTerms := make([]string, 0, len(funcs))
-		for _, f := range funcs {
-			memTerms = append(memTerms, fmt.Sprintf("%d %s", f.MemoryMB, xVar(b.ID, f.ID)))
-		}
-		sb.WriteString(fmt.Sprintf(
-			"mem_%s: %s - %d %s <= 0;\n",
-			sanitize(b.ID),
-			strings.Join(memTerms, " + "),
-			app.MaxMemoryMB,
-			xVar(b.ID, b.ID),
-		))
-	}
-	sb.WriteString("\n")
-
-	// 4. Cut definition: is_cut[u,v] ≥ x[b,u] - x[b,v] and ≥ x[b,v] - x[b,u]
-	// Python: for u, v in all_edges: for b in roots:
-	//             prob += is_cut[u,v] >= x[b,u] - x[b,v]
-	//             prob += is_cut[u,v] >= x[b,v] - x[b,u]
-	for _, e := range edges {
-		cv := cutVar(e.u.ID, e.v.ID)
-		for _, b := range funcs {
-			sb.WriteString(fmt.Sprintf(
-				"cutA_%s_%s_%s: %s - %s + %s >= 0;\n",
-				sanitize(b.ID), sanitize(e.u.ID), sanitize(e.v.ID),
-				cv, xVar(b.ID, e.u.ID), xVar(b.ID, e.v.ID),
-			))
-			sb.WriteString(fmt.Sprintf(
-				"cutB_%s_%s_%s: %s + %s - %s >= 0;\n",
-				sanitize(b.ID), sanitize(e.u.ID), sanitize(e.v.ID),
-				cv, xVar(b.ID, e.u.ID), xVar(b.ID, e.v.ID),
-			))
-		}
-	}
-	sb.WriteString("\n")
-
-	// 5. Latency constraint on critical path.
-	// Python: prob += runtime_sum + lpSum(hop_delay * is_cut[u,v] for cp_edges) <= max_latency
-	runtimeSum := 0
-	for _, f := range critPath {
-		runtimeSum += f.RuntimeMs()
-	}
-	hopTerms := make([]string, 0)
-	for i := 0; i < len(critPath)-1; i++ {
-		u, v := critPath[i], critPath[i+1]
-		hopTerms = append(hopTerms, fmt.Sprintf("%d %s", app.NetworkHopMS, cutVar(u.ID, v.ID)))
-	}
-	if len(hopTerms) > 0 {
-		sb.WriteString(fmt.Sprintf(
-			"latency: %s <= %d;\n\n",
-			strings.Join(hopTerms, " + "),
-			app.MaxLatencyMS-runtimeSum,
-		))
-	}
-
-	// Binary variable declarations.
-	sb.WriteString("bin\n")
-	for _, b := range funcs {
-		for _, f := range funcs {
-			sb.WriteString(fmt.Sprintf("  %s\n", xVar(b.ID, f.ID)))
-		}
-	}
-	for _, e := range edges {
-		sb.WriteString(fmt.Sprintf("  %s\n", cutVar(e.u.ID, e.v.ID)))
-	}
-	sb.WriteString("end\n")
-
-	// ── Write to temp file and invoke solver ──────────────────────────────────
+	// ── Write to temp file and invoke the solver ──────────────────────────────
 	lpFile, err := os.CreateTemp("", "optifuse_*.lp")
 	if err != nil {
 		return nil, fmt.Errorf("failed to create temp LP file: %w", err)
 	}
 	defer os.Remove(lpFile.Name())
 
-	if _, err := lpFile.WriteString(sb.String()); err != nil {
+	if _, err := lpFile.WriteString(lpText); err != nil {
 		return nil, fmt.Errorf("failed to write LP file: %w", err)
 	}
 	lpFile.Close()
@@ -185,14 +315,13 @@ func Solve(app *domain.Application) (*Result, error) {
 	defer os.Remove(solFile)
 
 	// Try glpsol first, fall back to cbc.
-	var out []byte
 	if _, err := exec.LookPath("glpsol"); err == nil {
-		out, err = exec.Command("glpsol", "--lp", lpFile.Name(), "-o", solFile, "--tmlim", "60").CombinedOutput()
+		out, err := exec.Command("glpsol", "--lp", lpFile.Name(), "-o", solFile, "--tmlim", "60").CombinedOutput()
 		if err != nil {
 			return &Result{Status: fmt.Sprintf("glpsol error: %s\n%s", err, out)}, nil
 		}
 	} else {
-		out, err = exec.Command("cbc", lpFile.Name(), "solve", "solution", solFile).CombinedOutput()
+		out, err := exec.Command("cbc", lpFile.Name(), "solve", "solution", solFile).CombinedOutput()
 		if err != nil {
 			return &Result{Status: fmt.Sprintf("cbc error: %s\n%s", err, out)}, nil
 		}
@@ -205,50 +334,24 @@ func Solve(app *domain.Application) (*Result, error) {
 	}
 	solText := string(solBytes)
 
-	if !strings.Contains(solText, "OPTIMAL") && !strings.Contains(solText, "INTEGER OPTIMAL") {
-		return &Result{Status: "infeasible or solver did not find optimal"}, nil
+	if status, ok := solvedOptimally(solText); !ok {
+		return &Result{Status: status}, nil
 	}
 
-	// Extract x variable values from solution.
-	// Build groups: for each b where x[b,b]=1, collect all f where x[b,f]=1.
-	groupsMap := make(map[string][]string) // barrierID → []memberID
-	for _, line := range strings.Split(solText, "\n") {
-		for _, b := range funcs {
-			for _, f := range funcs {
-				vname := xVar(b.ID, f.ID)
-				if strings.Contains(line, vname) {
-					fields := strings.Fields(line)
-					for i, field := range fields {
-						if field == vname && i+1 < len(fields) {
-							val, _ := strconv.ParseFloat(fields[i+1], 64)
-							if val > 0.5 {
-								groupsMap[b.ID] = append(groupsMap[b.ID], f.ID)
-							}
-						}
-					}
-				}
-			}
-		}
-	}
+	values := parseColumnValues(solText)
 
-	// Convert to []*LambdaFunction groups, only including groups where x[b,b]=1.
+	// Build groups: for each b with x[b,b] = 1, collect every f with x[b,f] = 1.
 	var groups [][]*domain.LambdaFunction
-	for bID, memberIDs := range groupsMap {
-		// Only include if b is actually a root (x[b,b]=1 is implied by presence in map).
-		isRoot := false
-		for _, mid := range memberIDs {
-			if mid == bID {
-				isRoot = true
-				break
-			}
+	for b := range funcs {
+		if values[xVar(b, b)] < 0.5 {
+			continue // not a group root
 		}
-		if !isRoot {
-			continue
-		}
-		group := make([]*domain.LambdaFunction, 0, len(memberIDs))
-		for _, fid := range memberIDs {
-			if f, ok := fm[fid]; ok {
-				group = append(group, f)
+		var group []*domain.LambdaFunction
+		for f, fn := range funcs {
+			if values[xVar(b, f)] > 0.5 {
+				if _, ok := fm[fn.ID]; ok {
+					group = append(group, fn)
+				}
 			}
 		}
 		if len(group) > 0 {
@@ -259,8 +362,55 @@ func Solve(app *domain.Application) (*Result, error) {
 	return &Result{Optimal: true, Status: "OPTIMAL", Groups: groups}, nil
 }
 
-// sanitize replaces characters that are invalid in LP variable names.
-func sanitize(s string) string {
-	replacer := strings.NewReplacer("-", "_", ".", "_", " ", "_", "/", "_")
-	return replacer.Replace(s)
+// solvedOptimally reports whether the solver proved optimality, returning the
+// status text when it did not.
+//
+// A plain strings.Contains(text, "OPTIMAL") is not enough: glpsol reports
+// "INTEGER NON-OPTIMAL" when it hits the time limit with a feasible incumbent,
+// which contains "OPTIMAL" as a substring and would be accepted as proven.
+func solvedOptimally(solText string) (string, bool) {
+	upper := strings.ToUpper(solText)
+	if strings.Contains(upper, "NON-OPTIMAL") || strings.Contains(upper, "NOT OPTIMAL") {
+		return "solver stopped before proving optimality (time limit?)", false
+	}
+	if !strings.Contains(upper, "OPTIMAL") {
+		return "infeasible or solver did not find an optimal solution", false
+	}
+	return "", true
+}
+
+// parseColumnValues extracts variable values from a solver solution file.
+//
+// glpsol's printable format is
+//
+//	   No. Column name       Activity     Lower bound   Upper bound
+//	     1 x_0_0        *              1             0             1
+//
+// where the '*' marks an integer column and is absent for continuous ones. cbc
+// writes "<index> <name> <value> <cost>". Both are handled by taking the first
+// field that parses as a number after the name, rather than assuming a fixed
+// column offset.
+func parseColumnValues(solText string) map[string]float64 {
+	values := make(map[string]float64)
+	for _, line := range strings.Split(solText, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 3 {
+			continue
+		}
+		// Row index, then variable name.
+		if _, err := strconv.Atoi(fields[0]); err != nil {
+			continue
+		}
+		name := fields[1]
+		if !strings.HasPrefix(name, "x_") && !strings.HasPrefix(name, "c_") {
+			continue
+		}
+		for _, f := range fields[2:] {
+			if v, err := strconv.ParseFloat(f, 64); err == nil {
+				values[name] = v
+				break
+			}
+		}
+	}
+	return values
 }
