@@ -196,9 +196,22 @@ func (g *GreedyTP) Optimize(app *domain.Application) AlgorithmResult {
 	}
 	groups = safeGroups
 
-	// ── Step 3: Secondary greedy merge (only non-cut edges) ──────────────────
-	// Python: merge_candidates = [(cost, f, child) for non-cut edges]
+	// ── Step 3: Secondary greedy merge ───────────────────────────────────────
+	// Python: merge_candidates = [(cost, f, child) for edges]
 	//         sort desc, then merge if memory fits
+	//
+	// Every edge is a candidate, including the critical-path edges cut in step 1.
+	// Excluding them — which this used to do — made step 1's cut choice permanent,
+	// and step 1 accepts the *fewest* merges the latency budget allows. So whenever
+	// the all-cut latency already fit, GreedyTP refused to fuse anything on the
+	// critical path, forfeiting its largest edges: on the image-processing app that
+	// is upload→resize (5 MiB) and resize→watermark (2 MiB), 9 of the graph's 18 MiB.
+	// The result could come out more expensive than NoFusion.
+	//
+	// Reconsidering them cannot break the latency guarantee. Merging two groups only
+	// ever removes cut edges, and latency is base critical-path runtime plus one hop
+	// per cut edge on it (domain.CalculateMetrics), so any merge leaves latency equal
+	// or lower. Memory is the only binding constraint here.
 	type candidate struct {
 		cost   float64
 		parent *domain.LambdaFunction
@@ -207,18 +220,24 @@ func (g *GreedyTP) Optimize(app *domain.Application) AlgorithmResult {
 	var candidates []candidate
 	for _, f := range app.Functions {
 		for _, child := range f.Children {
-			e := edge{f.ID, child.ID}
-			if !initialCuts[e] {
-				candidates = append(candidates, candidate{
-					cost:   f.DataTransferCostUSD(child.ID),
-					parent: f,
-					child:  child,
-				})
-			}
+			candidates = append(candidates, candidate{
+				cost:   f.DataTransferCostUSD(child.ID),
+				parent: f,
+				child:  child,
+			})
 		}
 	}
-	sort.Slice(candidates, func(i, j int) bool {
-		return candidates[i].cost > candidates[j].cost
+	// Ties are common — parallel branches often carry identical payloads — and an
+	// unstable sort would let the same input produce different recommendations on
+	// different runs. Break ties on IDs so the output is reproducible.
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].cost != candidates[j].cost {
+			return candidates[i].cost > candidates[j].cost
+		}
+		if candidates[i].parent.ID != candidates[j].parent.ID {
+			return candidates[i].parent.ID < candidates[j].parent.ID
+		}
+		return candidates[i].child.ID < candidates[j].child.ID
 	})
 
 	for _, c := range candidates {

@@ -1,11 +1,73 @@
 package algo_test
 
 import (
+	"sort"
+	"strings"
 	"testing"
 
 	"github.com/Vaivaswat2244/OptiFuse_go/services/optimizer/internal/algo"
 	"github.com/Vaivaswat2244/OptiFuse_go/services/optimizer/internal/domain"
 )
+
+// canonicalPartition renders a partition as a stable string so two runs can be
+// compared regardless of group or member ordering.
+func canonicalPartition(groups [][]*domain.LambdaFunction) string {
+	rendered := make([]string, 0, len(groups))
+	for _, g := range groups {
+		ids := make([]string, len(g))
+		for i, f := range g {
+			ids[i] = f.ID
+		}
+		sort.Strings(ids)
+		rendered = append(rendered, strings.Join(ids, "+"))
+	}
+	sort.Strings(rendered)
+	return strings.Join(rendered, ",")
+}
+
+// buildEcommerceApp mirrors the optifuse_lambda_test repo: a fulfilment chain
+// with one parallel branch, every function at the 512MB default.
+//
+//	orderPlaced → processPayment
+//	orderPlaced → updateInventory → prepareShipping → notifyCustomer → logCompletion
+//
+// The uniform memory matters: a 1024MB cap allows at most two functions per
+// group, which forces a real partitioning decision.
+func buildEcommerceApp() *domain.Application {
+	newFn := func(id string, durationMs float64) *domain.LambdaFunction {
+		return &domain.LambdaFunction{
+			ID: id, Name: id, MemoryMB: 512, TimeoutSec: 1, LoadFactor: 1.0,
+			AvgDurationMs: durationMs, DataOutBytes: make(map[string]int64),
+		}
+	}
+	orderPlaced := newFn("orderPlaced", 80)
+	processPayment := newFn("processPayment", 250)
+	updateInventory := newFn("updateInventory", 120)
+	prepareShipping := newFn("prepareShipping", 150)
+	notifyCustomer := newFn("notifyCustomer", 200)
+	logCompletion := newFn("logCompletion", 60)
+
+	orderPlaced.AddChild(processPayment, 262144)
+	orderPlaced.AddChild(updateInventory, 262144)
+	updateInventory.AddChild(prepareShipping, 524288)
+	prepareShipping.AddChild(notifyCustomer, 786432)
+	notifyCustomer.AddChild(logCompletion, 1048576)
+
+	return &domain.Application{
+		Name: "Ecommerce",
+		Functions: []*domain.LambdaFunction{
+			orderPlaced, processPayment, updateInventory,
+			prepareShipping, notifyCustomer, logCompletion,
+		},
+		CriticalPathIDs: []string{
+			"orderPlaced", "updateInventory", "prepareShipping",
+			"notifyCustomer", "logCompletion",
+		},
+		MaxMemoryMB:  1024,
+		MaxLatencyMS: 700,
+		NetworkHopMS: 10,
+	}
+}
 
 // buildImageProcessingApp constructs the exact application from the Python notebook.
 // Spec: image_processing_baseline
@@ -173,6 +235,64 @@ func TestGreedyTP_AllFunctionsAssigned(t *testing.T) {
 	}
 	if total != 6 {
 		t.Errorf("GreedyTP: expected 6 total functions, got %d", total)
+	}
+}
+
+// A fusion algorithm that loses to doing nothing is worse than useless — it is
+// actively misleading. GreedyTP used to return 3.433e-5 on the ecommerce app
+// where NoFusion costs 3.402e-5, because it refused to merge critical-path edges
+// whenever the latency budget was already satisfied.
+func TestGreedyTP_NeverWorseThanNoFusion(t *testing.T) {
+	for name, app := range map[string]*domain.Application{
+		"image-processing": buildImageProcessingApp(),
+		"ecommerce":        buildEcommerceApp(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			noFusion := (&algo.NoFusion{}).Optimize(app)
+			greedy := (&algo.GreedyTP{}).Optimize(app)
+			if greedy.Error != "" {
+				t.Fatalf("GreedyTP returned error: %s", greedy.Error)
+			}
+			if greedy.Metrics.TotalCostUSD > noFusion.Metrics.TotalCostUSD {
+				t.Errorf("GreedyTP cost %.6e exceeds NoFusion %.6e — fusing made it worse",
+					greedy.Metrics.TotalCostUSD, noFusion.Metrics.TotalCostUSD)
+			}
+		})
+	}
+}
+
+// The critical path carries the heaviest edges in both test applications, so a
+// partition that never merges along it is leaving most of the saving behind.
+func TestGreedyTP_MergesAlongCriticalPath(t *testing.T) {
+	app := buildImageProcessingApp()
+	result := (&algo.GreedyTP{}).Optimize(app)
+	if result.Error != "" {
+		t.Fatalf("GreedyTP returned error: %s", result.Error)
+	}
+
+	groupOf := domain.FuncToGroupIndex(result.Groups)
+	critPath := app.CriticalPath()
+	internalised := 0
+	for i := 0; i < len(critPath)-1; i++ {
+		if groupOf[critPath[i].ID] == groupOf[critPath[i+1].ID] {
+			internalised++
+		}
+	}
+	if internalised == 0 {
+		t.Errorf("GreedyTP cut every critical-path edge: %s", canonicalPartition(result.Groups))
+	}
+}
+
+// Equal-cost edges are common (parallel branches often carry identical
+// payloads). With an unstable sort the same input could yield different
+// recommendations run to run.
+func TestGreedyTP_IsDeterministic(t *testing.T) {
+	want := canonicalPartition((&algo.GreedyTP{}).Optimize(buildImageProcessingApp()).Groups)
+	for i := 0; i < 25; i++ {
+		got := canonicalPartition((&algo.GreedyTP{}).Optimize(buildImageProcessingApp()).Groups)
+		if got != want {
+			t.Fatalf("run %d produced %q, first run produced %q", i+1, got, want)
+		}
 	}
 }
 
