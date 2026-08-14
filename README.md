@@ -19,15 +19,9 @@ gateway ──gRPC──► parser    (serverless.yml → Graph)
 - [x] Build a call graph from a `custom.optifuse` block (see below)
 - [x] Six partitioning algorithms, ranked by total cost under memory and latency constraints
 - [x] CloudWatch telemetry via a customer-supplied cross-account IAM role
-- [ ] **Show the recommended grouping in the UI.** Today the frontend reports only
-      *how many* groups an algorithm produced — a count, not an answer. The user is
-      told "MinWCut, 3 groups, 48% cheaper" without ever learning *which functions
-      to merge*, which is the actual deliverable. The data is already there: each
-      result carries `groups[].function_ids` plus `total_memory_mb`,
-      `total_runtime_ms` and `execution_cost_usd` (see `FusionGroup` in
-      `proto/optimizer.proto`), and the gateway passes it through untouched. Only the
-      rendering is missing. Note the frontend currently types this as `string[][]`,
-      which does not match the wire format.
+- [x] Show the recommended grouping in the UI — which functions to merge, with each
+      group's memory, runtime and execution cost, from `FusionGroup` in
+      `proto/optimizer.proto`
 - [ ] Derive the call graph from X-Ray traces instead of a hand-written block
 - [ ] Generate the fused deployment artifact (the `deployer` service is stubbed out)
 
