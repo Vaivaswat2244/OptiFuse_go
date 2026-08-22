@@ -36,6 +36,7 @@ services:
     networks: [optifuse]
     ports:
       - "50051:50051"   # gRPC (internal only in prod; exposed here for debugging)
+      - "9091:9090"     # Prometheus metrics
     healthcheck:
       test: ["CMD-SHELL", "nc -z 127.0.0.1 50051 || exit 1"]
       interval: 10s
@@ -59,6 +60,7 @@ services:
     networks: [optifuse]
     ports:
       - "50052:50052"
+      - "9092:9090"     # Prometheus metrics
     environment:
       - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
@@ -81,6 +83,7 @@ services:
     networks: [optifuse]
     ports:
       - "50053:50053"
+      - "9093:9090"     # Prometheus metrics
     healthcheck:
       test: ["CMD-SHELL", "nc -z 127.0.0.1 50053 || exit 1"]
       interval: 10s
@@ -113,6 +116,7 @@ services:
     networks: [optifuse]
     ports:
       - "8080:8080"   # REST API — frontend points here
+      - "9094:9090"   # Prometheus metrics (never exposed publicly in prod)
     environment:
       - PARSER_ADDR=parser:50051
       - ENRICHER_ADDR=enricher:50052

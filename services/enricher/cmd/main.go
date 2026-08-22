@@ -4,11 +4,13 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"time"
 
 	pb "github.com/Vaivaswat2244/OptiFuse_go/proto"
 	enricher "github.com/Vaivaswat2244/OptiFuse_go/services/enricher/internal"
 	"github.com/Vaivaswat2244/OptiFuse_go/shared/grpcserver"
 	"github.com/Vaivaswat2244/OptiFuse_go/shared/logger"
+	"github.com/Vaivaswat2244/OptiFuse_go/shared/reqid"
 )
 
 var log *slog.Logger
@@ -19,6 +21,10 @@ type server struct {
 }
 
 func (s *server) Enrich(ctx context.Context, req *pb.EnrichRequest) (*pb.EnrichResponse, error) {
+	// Shadows the package logger so every line below carries the caller's
+	// request ID without touching the individual log calls.
+	log := reqid.Logger(ctx, log)
+
 	log.Info("enrich request received",
 		"service", req.ServiceName,
 		"stage", req.Stage,
@@ -26,6 +32,7 @@ func (s *server) Enrich(ctx context.Context, req *pb.EnrichRequest) (*pb.EnrichR
 		"role_arn", req.RoleArn,
 	)
 
+	start := time.Now()
 	graph, enrichedIDs, missingIDs, err := s.enricher.Enrich(
 		ctx,
 		req.Graph,
@@ -34,13 +41,20 @@ func (s *server) Enrich(ctx context.Context, req *pb.EnrichRequest) (*pb.EnrichR
 		req.ServiceName,
 		req.Stage,
 	)
+	enrichmentDuration.Observe(time.Since(start).Seconds())
+
 	if err != nil {
+		enrichmentRequests.WithLabelValues(classifyEnrichmentError(err.Error())).Inc()
 		log.Error("enrichment failed",
 			"service", req.ServiceName,
 			"error", err,
 		)
 		return nil, err
 	}
+
+	enrichmentRequests.WithLabelValues("success").Inc()
+	enrichmentFunctions.WithLabelValues("enriched").Add(float64(len(enrichedIDs)))
+	enrichmentFunctions.WithLabelValues("missing").Add(float64(len(missingIDs)))
 
 	log.Info("enrichment complete",
 		"service", req.ServiceName,

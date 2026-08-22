@@ -9,6 +9,7 @@ import (
 	parser "github.com/Vaivaswat2244/OptiFuse_go/services/parser/internal"
 	"github.com/Vaivaswat2244/OptiFuse_go/shared/grpcserver"
 	"github.com/Vaivaswat2244/OptiFuse_go/shared/logger"
+	"github.com/Vaivaswat2244/OptiFuse_go/shared/reqid"
 )
 
 var log *slog.Logger
@@ -18,6 +19,10 @@ type server struct {
 }
 
 func (s *server) Parse(ctx context.Context, req *pb.ParseRequest) (*pb.ParseResponse, error) {
+	// Shadows the package logger so every line below carries the caller's
+	// request ID without touching the individual log calls.
+	log := reqid.Logger(ctx, log)
+
 	log.Info("parse request received", "repo", req.RepoName)
 
 	parsed, err := parser.Parse(req.RepoName, req.YamlContent)

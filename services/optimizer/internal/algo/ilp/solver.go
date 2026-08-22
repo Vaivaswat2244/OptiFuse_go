@@ -383,8 +383,8 @@ func solvedOptimally(solText string) (string, bool) {
 //
 // glpsol's printable format is
 //
-//	   No. Column name       Activity     Lower bound   Upper bound
-//	     1 x_0_0        *              1             0             1
+//	No. Column name       Activity     Lower bound   Upper bound
+//	  1 x_0_0        *              1             0             1
 //
 // where the '*' marks an integer column and is absent for continuous ones. cbc
 // writes "<index> <name> <value> <cost>". Both are handled by taking the first

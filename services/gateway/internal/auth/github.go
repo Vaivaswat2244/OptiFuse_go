@@ -8,7 +8,17 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
+
+// githubClient replaces http.DefaultClient, which has no timeout at all.
+//
+// A hung connection to GitHub would otherwise block the calling goroutine
+// indefinitely with nothing able to cancel it — the request context is not
+// wired into these calls — so under load the gateway leaks workers until it
+// stops serving. 15s is generous for the Contents and Repos APIs while still
+// bounding the damage.
+var githubClient = &http.Client{Timeout: 15 * time.Second}
 
 // GitHubUser holds the fields we care about from the GitHub /user API.
 // Python: user_data = user_res.json()
@@ -32,7 +42,7 @@ func ExchangeCodeForToken(code, clientID, clientSecret string) (string, error) {
 	}
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := githubClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("github token request: %w", err)
 	}
@@ -64,7 +74,7 @@ func GetGitHubUser(accessToken string) (*GitHubUser, error) {
 	req.Header.Set("Authorization", "token "+accessToken)
 	req.Header.Set("Accept", "application/vnd.github.v3+json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := githubClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("github user request: %w", err)
 	}
@@ -96,7 +106,7 @@ func FetchFileFromGitHub(accessToken, owner, repo, path string) ([]byte, error) 
 	req.Header.Set("Authorization", "token "+accessToken)
 	req.Header.Set("Accept", "application/vnd.github.v3+json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := githubClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("github file request: %w", err)
 	}

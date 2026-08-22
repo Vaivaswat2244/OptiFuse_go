@@ -11,6 +11,7 @@ import (
 	"github.com/Vaivaswat2244/OptiFuse_go/services/optimizer/internal/domain"
 	"github.com/Vaivaswat2244/OptiFuse_go/shared/grpcserver"
 	"github.com/Vaivaswat2244/OptiFuse_go/shared/logger"
+	"github.com/Vaivaswat2244/OptiFuse_go/shared/reqid"
 )
 
 var log *slog.Logger
@@ -20,6 +21,10 @@ type server struct {
 }
 
 func (s *server) Optimize(ctx context.Context, req *pb.OptimizeRequest) (*pb.OptimizeResponse, error) {
+	// Shadows the package logger so every line below carries the caller's
+	// request ID without touching the individual log calls.
+	log := reqid.Logger(ctx, log)
+
 	app, err := graphToApp(req.Graph)
 	if err != nil {
 		log.Error("failed to convert graph to app", "error", err)
@@ -54,11 +59,22 @@ func (s *server) Optimize(ctx context.Context, req *pb.OptimizeRequest) (*pb.Opt
 
 	var results []*pb.AlgorithmResult
 	var bestResult *pb.AlgorithmResult
+	// Captured to express the recommendation as a saving against doing nothing,
+	// which is the number the user actually sees.
+	noFusionCost := 0.0
 
 	for _, o := range optimizers {
 		algoStart := time.Now()
 		r := o.Optimize(app)
 		elapsed := time.Since(algoStart)
+
+		algorithmDuration.WithLabelValues(algorithmSlug(r.Name)).Observe(elapsed.Seconds())
+		if r.Error != "" {
+			algorithmFailures.WithLabelValues(algorithmSlug(r.Name), classifyFailure(r.Error)).Inc()
+		}
+		if r.Name == "NoFusion" && r.Error == "" {
+			noFusionCost = r.Metrics.TotalCostUSD
+		}
 
 		log.Info("algorithm completed",
 			"algorithm", r.Name,
@@ -108,6 +124,20 @@ func (s *server) Optimize(ctx context.Context, req *pb.OptimizeRequest) (*pb.Opt
 				bestResult = pbResult
 			}
 		}
+	}
+
+	if bestResult != nil {
+		optimizationsTotal.WithLabelValues("feasible").Inc()
+		recommendations.WithLabelValues(algorithmSlug(bestResult.Name)).Inc()
+		if noFusionCost > 0 {
+			saving := (noFusionCost - bestResult.Metrics.TotalCostUsd) / noFusionCost
+			if saving < 0 {
+				saving = 0 // recommending something worse than NoFusion should read as zero, not negative
+			}
+			recommendationSavings.Observe(saving)
+		}
+	} else {
+		optimizationsTotal.WithLabelValues("infeasible").Inc()
 	}
 
 	log.Info("optimization complete",

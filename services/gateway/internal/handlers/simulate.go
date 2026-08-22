@@ -11,6 +11,29 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// Budgets for the simulation pipeline. Each hop gets its own so one slow
+// dependency cannot starve the next, under a single overall cap so a
+// pathological request cannot tie up a worker for the sum of every hop.
+const (
+	// The hops cannot all take their maximum and still fit inside this — that is
+	// deliberate. It bounds what one request can cost without having to reason
+	// about the worst case of every stage at once.
+	overallBudget = 120 * time.Second
+
+	// Parsing is pure CPU over a small YAML file. Anything slower is a bug,
+	// not load.
+	parseBudget = 10 * time.Second
+
+	// CloudWatch Logs Insights is poll-until-complete: the enricher starts a
+	// query and waits for it to be scheduled, which dominates the time and is
+	// entirely outside our control.
+	enrichBudget = 45 * time.Second
+
+	// Must exceed MtxILP's own 60s glpsol deadline, or we cancel the solver
+	// before it gets the chance to give up and report.
+	optimizeBudget = 90 * time.Second
+)
+
 // LiveSimulate handles POST /api/simulate/live/
 // Python: LiveSimulationView.post()
 //
@@ -44,20 +67,37 @@ func LiveSimulate(database *db.Pool, clients *grpcclient.Clients) gin.HandlerFun
 		}
 
 		// Step 1: Fetch serverless.yml from GitHub.
+		fetchStart := time.Now()
 		yamlContent, err := auth.FetchFileFromGitHub(
 			profile.GitHubAccessToken, body.Owner, body.RepoName, "serverless.yml",
 		)
+		fetchResult := "success"
+		if err != nil {
+			fetchResult = "error"
+		}
+		githubDuration.WithLabelValues("fetch_file", fetchResult).
+			Observe(time.Since(fetchStart).Seconds())
+
 		if err != nil {
 			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 			return
 		}
 
-		// Each downstream gRPC call gets a 30-second timeout.
-		ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
-		defer cancel()
+		// One overall cap, then a budget per hop beneath it.
+		//
+		// A single shared budget let a slow enricher consume the optimizer's time,
+		// and at 30s it was *shorter* than MtxILP's own 60s solver deadline — so a
+		// large graph was cancelled by the caller before the solver had finished
+		// the work it was asked to do. Deriving from the request context means a
+		// client disconnect still cancels everything immediately.
+		reqCtx, cancelAll := context.WithTimeout(c.Request.Context(), overallBudget)
+		defer cancelAll()
 
 		// Step 2: Parse YAML → Graph.
-		parsed, err := clients.Parser.Parse(ctx, body.RepoName, yamlContent)
+		parseCtx, cancelParse := context.WithTimeout(reqCtx, parseBudget)
+		defer cancelParse()
+
+		parsed, err := clients.Parser.Parse(parseCtx, body.RepoName, yamlContent)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{
 				"error":   "failed to parse serverless.yml",
@@ -80,7 +120,10 @@ func LiveSimulate(database *db.Pool, clients *grpcclient.Clients) gin.HandlerFun
 				serviceName = body.RepoName
 			}
 
-			enriched, err := clients.Enricher.Enrich(ctx, graph,
+			enrichCtx, cancelEnrich := context.WithTimeout(reqCtx, enrichBudget)
+			defer cancelEnrich()
+
+			enriched, err := clients.Enricher.Enrich(enrichCtx, graph,
 				profile.AWSRoleARN, profile.AWSExternalID,
 				serviceName, parsed.Stage,
 			)
@@ -94,7 +137,10 @@ func LiveSimulate(database *db.Pool, clients *grpcclient.Clients) gin.HandlerFun
 		}
 
 		// Step 4: Run all 6 optimization algorithms.
-		plan, err := clients.Optimizer.Optimize(ctx, graph)
+		optimizeCtx, cancelOptimize := context.WithTimeout(reqCtx, optimizeBudget)
+		defer cancelOptimize()
+
+		plan, err := clients.Optimizer.Optimize(optimizeCtx, graph)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{
 				"error":   "optimization failed",

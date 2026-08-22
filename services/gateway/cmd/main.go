@@ -15,6 +15,8 @@ import (
 	"github.com/Vaivaswat2244/OptiFuse_go/services/gateway/internal/grpcclient"
 	"github.com/Vaivaswat2244/OptiFuse_go/services/gateway/internal/handlers"
 	"github.com/Vaivaswat2244/OptiFuse_go/shared/logger"
+	"github.com/Vaivaswat2244/OptiFuse_go/shared/metrics"
+	"github.com/Vaivaswat2244/OptiFuse_go/shared/reqid"
 	"github.com/gin-gonic/gin"
 )
 
@@ -43,9 +45,14 @@ func main() {
 		"optimizer", os.Getenv("OPTIMIZER_ADDR"),
 	)
 
+	stopMetrics := metrics.Serve(metrics.Port(), log)
+
 	r := gin.Default()
 	r.Use(corsMiddleware())
+	// Must precede requestLogger so the logged line carries the ID.
+	r.Use(requestIDMiddleware())
 	r.Use(requestLogger())
+	r.Use(metricsMiddleware())
 
 	// Liveness: is this process alive? Deliberately unconditional.
 	//
@@ -131,6 +138,11 @@ func main() {
 		_ = srv.Close()
 	}
 
+	// Stopped after the API so the final scrape can still observe the drain.
+	if err := stopMetrics(shutdownCtx); err != nil {
+		log.Warn("metrics server shutdown", "error", err)
+	}
+
 	clients.Close()
 	log.Info("gateway stopped")
 }
@@ -145,11 +157,30 @@ const (
 	shutdownTimeout = 25 * time.Second
 )
 
+// requestIDMiddleware assigns each request an ID and puts it on the request
+// context, from where the gRPC client interceptor forwards it downstream.
+//
+// An inbound X-Request-ID is honoured rather than overwritten, so a load
+// balancer or the frontend can supply its own and have it flow through. The ID
+// is echoed in the response header: that is what lets you copy a value out of a
+// browser network tab and search the logs for exactly that request.
+func requestIDMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		id := c.GetHeader("X-Request-ID")
+		if id == "" {
+			id = reqid.Generate()
+		}
+		c.Header("X-Request-ID", id)
+		c.Request = c.Request.WithContext(reqid.NewContext(c.Request.Context(), id))
+		c.Next()
+	}
+}
+
 // requestLogger logs every incoming HTTP request.
 func requestLogger() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Next()
-		log.Info("request",
+		reqid.Logger(c.Request.Context(), log).Info("request",
 			"method", c.Request.Method,
 			"path", c.Request.URL.Path,
 			"status", c.Writer.Status(),

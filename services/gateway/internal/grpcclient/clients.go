@@ -6,6 +6,9 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+
+	"github.com/Vaivaswat2244/OptiFuse_go/shared/metrics"
+	"github.com/Vaivaswat2244/OptiFuse_go/shared/reqid"
 )
 
 // Clients holds gRPC connections to all internal services.
@@ -80,8 +83,18 @@ func (c *Clients) Close() {
 func dial(addr string) (*grpc.ClientConn, error) {
 	// insecure is fine on a private Kubernetes network.
 	// Add TLS here when exposing services across clusters.
+	//
+	// The client-side metrics interceptor is worth having alongside the server's:
+	// it measures latency as the caller experiences it, including name
+	// resolution, connection setup and queuing that the callee never sees. A gap
+	// between the two is how you spot a networking problem rather than a slow
+	// handler.
 	return grpc.NewClient(addr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithChainUnaryInterceptor(
+			reqid.ClientInterceptor(),
+			metrics.GRPCClientInterceptor(),
+		),
 	)
 }
 
