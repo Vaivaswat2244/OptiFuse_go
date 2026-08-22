@@ -296,28 +296,64 @@ the original Django implementation.
 
 ## Observability
 
-What exists today:
+**Logging.** `shared/logger` — `log/slog`, JSON when `LOG_FORMAT=json`, level from `LOG_LEVEL`
+(default `info`), every line tagged with `service`. The optimizer logs one `algorithm completed`
+line per algorithm with cost, latency, feasibility and wall-clock time, which diagnoses most bad
+recommendations from logs alone.
 
-- **Structured logging** everywhere via `shared/logger` — `log/slog`, JSON when `LOG_FORMAT=json`,
-  every line tagged with `service`. The optimizer logs one `algorithm completed` line per
-  algorithm with cost, latency, feasibility, group count and wall-clock time, which is enough to
-  diagnose most bad recommendations from logs alone.
-- **Health checks** on every container: TCP probes for the gRPC services, `GET /health` for the
-  gateway, `pg_isready` for Postgres.
-- **A panic-recovery interceptor** on the optimizer, so a malformed user-supplied topology
-  returns a gRPC error instead of taking down the process.
+**Metrics.** Every service serves Prometheus text on `:9090/metrics` (override with
+`METRICS_PORT`), on a separate listener from application traffic so it can be scraped inside the
+cluster without being publicly reachable.
 
-What's missing, and worth building alongside a real deployment:
+`shared/metrics` provides the transport-level RED metrics — `grpc_server_requests_total`,
+`grpc_server_request_duration_seconds`, and the client-side equivalents on the gateway. The
+client and server histograms are both worth having: a gap between them is a networking problem
+rather than a slow handler.
 
-- No metrics. There is no `/metrics` endpoint and no Prometheus client — no request rate,
-  latency histogram, or error rate for any service.
-- No distributed tracing. A slow `/api/simulate/live/` cannot be attributed across the four
-  services without reading logs by timestamp.
-- No correlation ID. Nothing ties the gateway's log line to the parser and optimizer lines from
-  the same request, which makes concurrent requests genuinely hard to untangle.
-- gRPC calls have a single 30-second timeout for the whole downstream chain, no per-service
-  budget, and no retry or circuit-breaking.
-- Log level is hardcoded to `Debug` in `shared/logger`, which is noisy for production.
+The domain metrics are declared in the service that emits them, so a binary only exposes series
+it can populate:
+
+| Metric | Service | Why |
+|---|---|---|
+| `optifuse_algorithm_duration_seconds{algorithm}` | optimizer | MtxILP is exponential under a 60s deadline; the rest finish in microseconds |
+| `optifuse_algorithm_failures_total{algorithm,reason}` | optimizer | MtxILP failed on every run for months unnoticed — a failing algorithm looks the same as a losing one |
+| `optifuse_recommendation_total{algorithm}` | optimizer | Which algorithm actually wins in production |
+| `optifuse_recommendation_savings_ratio` | optimizer | Saving vs NoFusion. Clustered near zero means the product isn't earning its keep |
+| `optifuse_enrichment_functions_total{result}` | enricher | `missing` means a yml estimate silently stood in for real telemetry |
+| `optifuse_enrichment_requests_total{result}` | enricher | Classified AWS failures — each label is a different fix |
+| `optifuse_github_api_duration_seconds` | gateway | The dominant term in end-to-end latency |
+
+Label values are bounded by design. Algorithm labels are stable slugs (`mtx_ilp`, not the
+display string `MtxILP (Optimal)`) so retitling a UI column can't break a dashboard; error
+reasons are classified rather than passed through, since raw AWS messages and solver output
+embed request IDs and temp paths that would mint a new time series per request.
+
+**Health checks** on every container: gRPC services register `grpc.health.v1.Health` and report
+`NOT_SERVING` while draining; the gateway splits `/healthz` (liveness) from `/readyz`
+(readiness). Postgres uses `pg_isready`.
+
+**Graceful shutdown** everywhere — SIGTERM drains for 2s while endpoint removal propagates, then
+stops within 25s, under Kubernetes' default 30s grace period.
+
+**Correlation IDs.** Every log line for one user request carries the same `request_id`, across
+all four services. The gateway honours an inbound `X-Request-ID` or generates one, echoes it in
+the response header — so an ID copied from a browser network tab can be pasted straight into a
+log query — and `shared/reqid` forwards it through gRPC metadata. A service called directly
+generates its own rather than logging untagged.
+
+**Timeouts.** Each hop of the simulation pipeline has its own budget (parse 10s, enrich 45s,
+optimize 90s) beneath a 120s overall cap, all derived from the request context so a client
+disconnect cancels everything. The optimize budget deliberately exceeds MtxILP's own 60s solver
+deadline; a single shared 30s budget used to cancel the solver before it could report.
+
+Still missing:
+
+- No distributed tracing. `request_id` groups the lines but does not give you a span tree or
+  per-hop timing without arithmetic. `shared/reqid` is the seam OpenTelemetry would slot into —
+  the propagation points are already correct, so adopting it is a swap rather than a rewrite.
+- No retries or circuit-breaking on gRPC calls.
+- The compose health checks are still `nc -z`, which only proves the port is bound. Kubernetes
+  will use the gRPC health service natively.
 
 ---
 
