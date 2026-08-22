@@ -2,9 +2,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/Vaivaswat2244/OptiFuse_go/services/gateway/internal/auth"
 	"github.com/Vaivaswat2244/OptiFuse_go/services/gateway/internal/db"
@@ -43,8 +47,39 @@ func main() {
 	r.Use(corsMiddleware())
 	r.Use(requestLogger())
 
-	r.GET("/health", func(c *gin.Context) {
+	// Liveness: is this process alive? Deliberately unconditional.
+	//
+	// A failing liveness probe makes Kubernetes *restart* the pod, so it must not
+	// depend on anything external — otherwise one database blip restarts every
+	// gateway in the cluster at once, which turns a brief outage into a long one.
+	liveness := func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	}
+	r.GET("/healthz", liveness)
+	r.GET("/health", liveness) // kept: the compose healthcheck still calls this
+
+	// Readiness: should this pod receive traffic?
+	//
+	// Gated on the database only. Every authenticated request looks up a token,
+	// so without Postgres the gateway can serve nothing — but the downstream gRPC
+	// services are reported without gating, on purpose. If the optimizer is down,
+	// marking the gateway unready would remove the only ingress and take down
+	// login and repo browsing too, converting a partial outage into a total one.
+	r.GET("/readyz", func(c *gin.Context) {
+		ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
+		defer cancel()
+
+		body := gin.H{"upstreams": clients.ConnStates()}
+
+		if err := database.Ping(ctx); err != nil {
+			body["status"] = "not ready"
+			body["database"] = err.Error()
+			c.JSON(http.StatusServiceUnavailable, body)
+			return
+		}
+		body["status"] = "ready"
+		body["database"] = "ok"
+		c.JSON(http.StatusOK, body)
 	})
 
 	api := r.Group("/api")
@@ -66,12 +101,49 @@ func main() {
 	if port == "" {
 		port = "8080"
 	}
-	log.Info("gateway started", "port", port)
-	if err := r.Run(":" + port); err != nil {
-		log.Error("server error", "error", err)
-		os.Exit(1)
+
+	srv := &http.Server{Addr: ":" + port, Handler: r}
+
+	// Run the listener in the background so main can wait on a signal instead.
+	go func() {
+		log.Info("gateway started", "port", port)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Error("server error", "error", err)
+			os.Exit(1)
+		}
+	}()
+
+	sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+	<-sigCtx.Done()
+
+	// Kubernetes removes the pod from Service endpoints concurrently with
+	// SIGTERM rather than before it, so requests can still arrive for a moment
+	// after this point. Keep serving briefly, then drain.
+	log.Info("shutdown signal received, draining", "drain_delay", drainDelay)
+	time.Sleep(drainDelay)
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Warn("graceful shutdown timed out, closing anyway", "error", err)
+		_ = srv.Close()
 	}
+
+	clients.Close()
+	log.Info("gateway stopped")
 }
+
+const (
+	// drainDelay keeps the server accepting requests after SIGTERM while the
+	// pod's removal propagates to every kube-proxy.
+	drainDelay = 2 * time.Second
+
+	// shutdownTimeout bounds the wait for in-flight requests. Kept under
+	// Kubernetes' default 30s grace period so we exit before SIGKILL.
+	shutdownTimeout = 25 * time.Second
+)
 
 // requestLogger logs every incoming HTTP request.
 func requestLogger() gin.HandlerFunc {

@@ -14,6 +14,10 @@ type Clients struct {
 	Parser    *ParserClient
 	Enricher  *EnricherClient
 	Optimizer *OptimizerClient
+
+	// conns is kept so shutdown can close them and the readiness probe can
+	// report their connectivity state.
+	conns map[string]*grpc.ClientConn
 }
 
 // New creates gRPC connections to all services using addresses from env vars.
@@ -42,7 +46,35 @@ func New() (*Clients, error) {
 		Parser:    NewParserClient(parserConn),
 		Enricher:  NewEnricherClient(enricherConn),
 		Optimizer: NewOptimizerClient(optimizerConn),
+		conns: map[string]*grpc.ClientConn{
+			"parser":    parserConn,
+			"enricher":  enricherConn,
+			"optimizer": optimizerConn,
+		},
 	}, nil
+}
+
+// ConnStates reports each downstream connection's state, for the readiness
+// endpoint.
+//
+// Note IDLE is normal, not a fault: grpc.NewClient is lazy and does not connect
+// until the first RPC, so a freshly started gateway with no traffic sits in IDLE
+// on all three. Only TRANSIENT_FAILURE and SHUTDOWN indicate a problem.
+func (c *Clients) ConnStates() map[string]string {
+	states := make(map[string]string, len(c.conns))
+	for name, conn := range c.conns {
+		states[name] = conn.GetState().String()
+	}
+	return states
+}
+
+// Close tears down every downstream connection.
+func (c *Clients) Close() {
+	for name, conn := range c.conns {
+		if err := conn.Close(); err != nil {
+			_ = name // best effort; nothing useful to do on a shutdown path
+		}
+	}
 }
 
 func dial(addr string) (*grpc.ClientConn, error) {

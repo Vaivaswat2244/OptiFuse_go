@@ -31,6 +31,13 @@ func (p *Pool) Close() {
 	p.pool.Close()
 }
 
+// Ping reports whether the database is reachable. Used by the readiness probe:
+// every authenticated request looks up a token, so a gateway that cannot reach
+// Postgres cannot serve anything useful.
+func (p *Pool) Ping(ctx context.Context) error {
+	return p.pool.Ping(ctx)
+}
+
 // ── Domain types ──────────────────────────────────────────────────────────────
 
 type User struct {
