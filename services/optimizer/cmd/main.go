@@ -3,18 +3,13 @@ package main
 import (
 	"context"
 	"log/slog"
-	"net"
 	"os"
-	"runtime/debug"
 	"time"
-
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 
 	pb "github.com/Vaivaswat2244/OptiFuse_go/proto"
 	"github.com/Vaivaswat2244/OptiFuse_go/services/optimizer/internal/algo"
 	"github.com/Vaivaswat2244/OptiFuse_go/services/optimizer/internal/domain"
+	"github.com/Vaivaswat2244/OptiFuse_go/shared/grpcserver"
 	"github.com/Vaivaswat2244/OptiFuse_go/shared/logger"
 )
 
@@ -141,43 +136,13 @@ func main() {
 		port = "50053"
 	}
 
-	lis, err := net.Listen("tcp", ":"+port)
-	if err != nil {
-		log.Error("failed to listen", "port", port, "error", err)
-		os.Exit(1)
-	}
+	srv := grpcserver.New(log)
+	pb.RegisterOptimizerServiceServer(srv.GRPC(), &server{})
 
-	s := grpc.NewServer(grpc.UnaryInterceptor(recoveryInterceptor))
-	pb.RegisterOptimizerServiceServer(s, &server{})
-
-	log.Info("optimizer service started", "port", port)
-	if err := s.Serve(lis); err != nil {
+	if err := srv.Serve(port); err != nil {
 		log.Error("server error", "error", err)
 		os.Exit(1)
 	}
-}
-
-// recoveryInterceptor turns a panic in any algorithm into a gRPC error instead
-// of letting it kill the process. The graph is user-supplied (via a hand-written
-// custom.optifuse block), so a malformed topology must not take the service down
-// for everyone else.
-func recoveryInterceptor(
-	ctx context.Context,
-	req interface{},
-	info *grpc.UnaryServerInfo,
-	handler grpc.UnaryHandler,
-) (resp interface{}, err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			log.Error("panic recovered in handler",
-				"method", info.FullMethod,
-				"panic", r,
-				"stack", string(debug.Stack()),
-			)
-			err = status.Errorf(codes.Internal, "internal error processing %s", info.FullMethod)
-		}
-	}()
-	return handler(ctx, req)
 }
 
 // suppress unused import if time is not used elsewhere

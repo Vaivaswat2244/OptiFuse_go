@@ -3,13 +3,11 @@ package main
 import (
 	"context"
 	"log/slog"
-	"net"
 	"os"
-
-	"google.golang.org/grpc"
 
 	pb "github.com/Vaivaswat2244/OptiFuse_go/proto"
 	parser "github.com/Vaivaswat2244/OptiFuse_go/services/parser/internal"
+	"github.com/Vaivaswat2244/OptiFuse_go/shared/grpcserver"
 	"github.com/Vaivaswat2244/OptiFuse_go/shared/logger"
 )
 
@@ -110,17 +108,10 @@ func main() {
 		port = "50051"
 	}
 
-	lis, err := net.Listen("tcp", ":"+port)
-	if err != nil {
-		log.Error("failed to listen", "port", port, "error", err)
-		os.Exit(1)
-	}
+	srv := grpcserver.New(log)
+	pb.RegisterParserServiceServer(srv.GRPC(), &server{})
 
-	s := grpc.NewServer()
-	pb.RegisterParserServiceServer(s, &server{})
-
-	log.Info("parser service started", "port", port)
-	if err := s.Serve(lis); err != nil {
+	if err := srv.Serve(port); err != nil {
 		log.Error("server error", "error", err)
 		os.Exit(1)
 	}
