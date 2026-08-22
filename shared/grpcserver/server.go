@@ -23,6 +23,9 @@ import (
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/reflection"
 	"google.golang.org/grpc/status"
+
+	"github.com/Vaivaswat2244/OptiFuse_go/shared/metrics"
+	"github.com/Vaivaswat2244/OptiFuse_go/shared/reqid"
 )
 
 const (
@@ -55,12 +58,20 @@ type Server struct {
 // New builds a gRPC server with the standard interceptor chain and a registered
 // health service.
 //
-// Extra interceptors run *outside* the recovery interceptor, so they observe the
-// error recovery produces rather than being unwound by the panic itself. That
-// ordering matters for the metrics interceptor: a handler that panics should be
-// recorded as a failed request, not vanish from the counters.
+// Chain order is reqid → metrics → extra → recovery, outermost first.
+//
+// reqid runs first so every later interceptor and the handler itself can see the
+// request ID. Recovery must be innermost so that metrics observes the Internal
+// error it produces: were the order reversed, a panicking handler would unwind
+// straight through the metrics interceptor and the request would vanish from the
+// counters entirely — exactly the request you most want to see on a dashboard.
 func New(log *slog.Logger, extra ...grpc.UnaryServerInterceptor) *Server {
-	chain := append(append([]grpc.UnaryServerInterceptor{}, extra...), recoveryInterceptor(log))
+	chain := []grpc.UnaryServerInterceptor{
+		reqid.ServerInterceptor(),
+		metrics.GRPCServerInterceptor(),
+	}
+	chain = append(chain, extra...)
+	chain = append(chain, recoveryInterceptor(log))
 
 	s := grpc.NewServer(grpc.ChainUnaryInterceptor(chain...))
 
@@ -100,6 +111,17 @@ func (s *Server) Serve(port string) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
+
+	// Started here rather than in serve() so tests driving the lifecycle directly
+	// do not contend for the metrics port.
+	stopMetrics := metrics.Serve(metrics.Port(), s.log)
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := stopMetrics(shutdownCtx); err != nil {
+			s.log.Warn("metrics server shutdown", "error", err)
+		}
+	}()
 
 	return s.serve(ctx, lis, port)
 }
