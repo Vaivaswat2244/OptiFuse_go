@@ -16,6 +16,14 @@ import (
 
 var log *slog.Logger
 
+// Set at build time via -ldflags "-X main.version=... -X main.commit=...".
+// Logged at startup so it is always possible to tell which build a running pod
+// is actually executing.
+var (
+	version = "dev"
+	commit  = "unknown"
+)
+
 type server struct {
 	pb.UnimplementedOptimizerServiceServer
 }
@@ -160,6 +168,7 @@ func (s *server) Optimize(ctx context.Context, req *pb.OptimizeRequest) (*pb.Opt
 
 func main() {
 	log = logger.New("optimizer")
+	log.Info("starting", "version", version, "commit", commit)
 
 	port := os.Getenv("PORT")
 	if port == "" {

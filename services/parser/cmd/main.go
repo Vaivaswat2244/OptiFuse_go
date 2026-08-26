@@ -14,6 +14,14 @@ import (
 
 var log *slog.Logger
 
+// Set at build time via -ldflags "-X main.version=... -X main.commit=...".
+// Logged at startup so it is always possible to tell which build a running pod
+// is actually executing.
+var (
+	version = "dev"
+	commit  = "unknown"
+)
+
 type server struct {
 	pb.UnimplementedParserServiceServer
 }
@@ -107,6 +115,7 @@ func (s *server) Parse(ctx context.Context, req *pb.ParseRequest) (*pb.ParseResp
 
 func main() {
 	log = logger.New("parser")
+	log.Info("starting", "version", version, "commit", commit)
 
 	port := os.Getenv("PORT")
 	if port == "" {

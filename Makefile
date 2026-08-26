@@ -1,5 +1,8 @@
 MODULE := github.com/Vaivaswat2244/OptiFuse_go
-SERVICES := gateway parser enricher optimizer deployer
+# deployer is intentionally absent: it is a designed but unimplemented service
+# (proto contract only — see services/deployer/README.md). Listing it here made
+# `make build` fail with "services/deployer/cmd: directory not found".
+SERVICES := gateway parser enricher optimizer
 GO := go
 PROTOC := protoc
 

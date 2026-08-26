@@ -22,8 +22,17 @@ import (
 
 var log *slog.Logger
 
+// Set at build time via -ldflags "-X main.version=... -X main.commit=...".
+// Logged at startup so it is always possible to tell which build a running pod
+// is actually executing.
+var (
+	version = "dev"
+	commit  = "unknown"
+)
+
 func main() {
 	log = logger.New("gateway")
+	log.Info("starting", "version", version, "commit", commit)
 	ctx := context.Background()
 
 	database, err := db.New(ctx, mustEnv("DATABASE_URL"))

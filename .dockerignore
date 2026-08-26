@@ -1,0 +1,23 @@
+# Docker does not read .gitignore — only this file. Without it, `COPY . .` in the
+# builder stage copies .env (live AWS credentials) into an image layer. The final
+# stage only copies the binary out, so the keys never reach the runtime image, but
+# they persist in the build cache and are pushed when CI uses registry-backed
+# caching. A build context is not a private place.
+
+.git
+.gitignore
+.github
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Local build output
+bin/
+
+# Not needed to compile; excluded so editing them cannot invalidate the
+# compile layer.
+*.md
+docker-compose.yml
+repomix-output.xml

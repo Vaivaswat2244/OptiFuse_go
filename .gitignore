@@ -1,1 +1,8 @@
+# Local secrets. Note Docker does not read this file — see .dockerignore.
 .env
+
+# Repo dump produced by repomix; regenerate rather than commit.
+repomix-output.xml
+
+# Build output
+bin/
