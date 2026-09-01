@@ -51,6 +51,16 @@ type LambdaFunction struct {
 	ErrorRate       float64
 	P99LatencyMs    float64
 	ColdStartRate   float64
+
+	// Cold start cost, written by the enricher from CloudWatch REPORT records.
+	// Init is the runtime boot plus module loading plus top-level code, and is a
+	// property of the code and its memory setting rather than of traffic, so it
+	// is stable enough to measure once and reuse.
+	//
+	// Nothing reads these yet. The cost model gains a cold start term in a later
+	// phase; collecting first means there is real data to build it against.
+	AvgInitDurationMs float64
+	P99InitDurationMs float64
 }
 
 // BaselineRuntimeMs returns the runtime in milliseconds, adjusted for load.

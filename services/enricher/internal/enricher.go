@@ -61,6 +61,12 @@ func (e *Enricher) Enrich(ctx context.Context, graph *pb.Graph, roleARN, externa
 				node.AvgDurationMs = m.avgDurationMs
 				node.AvgMemoryUsedMb = m.avgMemoryUsedMB
 				node.InvocationCount = m.invocationCount
+				node.P99LatencyMs = m.p99DurationMs
+				node.AvgInitDurationMs = m.avgInitDurationMs
+				node.P99InitDurationMs = m.p99InitDurationMs
+				if m.invocationCount > 0 {
+					node.ColdStartRate = float64(m.coldStarts) / float64(m.invocationCount)
+				}
 			}
 			enrichedIDs = append(enrichedIDs, id)
 		} else {
@@ -74,8 +80,16 @@ func (e *Enricher) Enrich(ctx context.Context, graph *pb.Graph, roleARN, externa
 // functionMetrics holds the CloudWatch data for a single function.
 type functionMetrics struct {
 	avgDurationMs   float64
+	p99DurationMs   float64
 	avgMemoryUsedMB float64
 	invocationCount int64
+
+	// Cold start telemetry. coldStarts counts REPORT records carrying an
+	// @initDuration field, which Lambda emits only when it had to build a new
+	// execution environment.
+	avgInitDurationMs float64
+	p99InitDurationMs float64
+	coldStarts        int64
 }
 
 // assumeRole assumes the user's IAM role and returns an AWS config.
@@ -107,11 +121,25 @@ func queryCloudWatch(ctx context.Context, cfg aws.Config, logGroups, functionIDs
 	end := time.Now()
 	start := end.Add(-24 * time.Hour)
 
-	// Same query as the Python version.
+	// REPORT records are emitted for every single invocation and are never
+	// sampled, unlike X-Ray traces (whose default rule keeps one request per
+	// second plus 5% of the rest). That matters most for init duration: fitting
+	// it from a sampled subset of cold starts would be fitting it from whichever
+	// handful happened to survive sampling.
+	//
+	// @initDuration is present ONLY on cold starts, which is what makes
+	// ispresent() a cold start counter. The average is computed as sum/count
+	// rather than avg(@initDuration) because it is not worth depending on how
+	// Logs Insights treats a field absent from most rows: sum/sum is correct
+	// under either interpretation.
 	query := `filter @type = "REPORT"
 | stats avg(@duration) as avgDurationMS,
+        pct(@duration, 99) as p99DurationMS,
         avg(@maxMemoryUsed) / 1024 / 1024 as avgMemoryMB,
-        count(*) as invocations
+        count(*) as invocations,
+        sum(@initDuration) as totalInitMS,
+        sum(ispresent(@initDuration)) as coldStarts,
+        pct(@initDuration, 99) as p99InitMS
 by @log as logGroupName`
 
 	startResp, err := client.StartQuery(ctx, &cloudwatchlogs.StartQueryInput{
@@ -130,7 +158,11 @@ by @log as logGroupName`
 	}
 
 	// Poll until complete — Python used a while loop with time.sleep(1).
-	var results []types.ResultField
+	//
+	// Results are kept as rows. An earlier version flattened them into one slice
+	// and re-chunked by a hardcoded stride of 4, which silently corrupted every
+	// parse the moment the query gained or lost a field.
+	var results [][]types.ResultField
 	for {
 		resp, err := client.GetQueryResults(ctx, &cloudwatchlogs.GetQueryResultsInput{
 			QueryId: startResp.QueryId,
@@ -139,9 +171,7 @@ by @log as logGroupName`
 			return nil, fmt.Errorf("get query results: %w", err)
 		}
 		if resp.Status == types.QueryStatusComplete {
-			for _, row := range resp.Results {
-				results = append(results, row...)
-			}
+			results = append(results, resp.Results...)
 			break
 		}
 		if resp.Status == types.QueryStatusFailed || resp.Status == types.QueryStatusCancelled {
@@ -153,12 +183,7 @@ by @log as logGroupName`
 	// Parse results — match log group name back to function ID.
 	// Python: for result in query_results: matched_function_id = ...
 	metrics := make(map[string]functionMetrics)
-	for i := 0; i < len(results); i += 4 {
-		if i+3 >= len(results) {
-			break
-		}
-
-		row := results[i : i+4]
+	for _, row := range results {
 		logGroupName := fieldValue(row, "logGroupName")
 		if logGroupName == "" {
 			continue
@@ -179,9 +204,21 @@ by @log as logGroupName`
 		}
 
 		var m functionMetrics
+		var totalInitMs float64
 		fmt.Sscanf(fieldValue(row, "avgDurationMS"), "%f", &m.avgDurationMs)
+		fmt.Sscanf(fieldValue(row, "p99DurationMS"), "%f", &m.p99DurationMs)
 		fmt.Sscanf(fieldValue(row, "avgMemoryMB"), "%f", &m.avgMemoryUsedMB)
 		fmt.Sscanf(fieldValue(row, "invocations"), "%d", &m.invocationCount)
+		fmt.Sscanf(fieldValue(row, "totalInitMS"), "%f", &totalInitMs)
+		fmt.Sscanf(fieldValue(row, "coldStarts"), "%d", &m.coldStarts)
+		fmt.Sscanf(fieldValue(row, "p99InitMS"), "%f", &m.p99InitDurationMs)
+
+		// Averaged over cold starts only, since warm invocations have no init
+		// phase at all. Dividing by total invocations would understate it by
+		// exactly the cold start rate.
+		if m.coldStarts > 0 {
+			m.avgInitDurationMs = totalInitMs / float64(m.coldStarts)
+		}
 		metrics[matchedID] = m
 	}
 

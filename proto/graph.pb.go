@@ -49,8 +49,20 @@ type FunctionNode struct {
 	ErrorRate       float64 `protobuf:"fixed64,23,opt,name=error_rate,json=errorRate,proto3" json:"error_rate,omitempty"`
 	P99LatencyMs    float64 `protobuf:"fixed64,24,opt,name=p99_latency_ms,json=p99LatencyMs,proto3" json:"p99_latency_ms,omitempty"`
 	ColdStartRate   float64 `protobuf:"fixed64,25,opt,name=cold_start_rate,json=coldStartRate,proto3" json:"cold_start_rate,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// ── Cold start telemetry ───────────────────────────────────────────────────
+	// "Init duration" is the INIT phase of a cold start: booting the runtime,
+	// loading the handler module and running top-level code. CloudWatch emits it
+	// in the REPORT line ONLY when the invocation was a cold start, which is how
+	// cold_start_rate above is derived (cold starts / total invocations).
+	//
+	// Init is a property of the code and its memory setting, not of traffic, so
+	// it is stable enough to measure once and reuse. p99 matters more than the
+	// average here: the whole cold start argument is about tail latency, and an
+	// average hides exactly the tail that provisioned concurrency exists to fix.
+	AvgInitDurationMs float64 `protobuf:"fixed64,26,opt,name=avg_init_duration_ms,json=avgInitDurationMs,proto3" json:"avg_init_duration_ms,omitempty"`
+	P99InitDurationMs float64 `protobuf:"fixed64,27,opt,name=p99_init_duration_ms,json=p99InitDurationMs,proto3" json:"p99_init_duration_ms,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *FunctionNode) Reset() {
@@ -184,6 +196,20 @@ func (x *FunctionNode) GetP99LatencyMs() float64 {
 func (x *FunctionNode) GetColdStartRate() float64 {
 	if x != nil {
 		return x.ColdStartRate
+	}
+	return 0
+}
+
+func (x *FunctionNode) GetAvgInitDurationMs() float64 {
+	if x != nil {
+		return x.AvgInitDurationMs
+	}
+	return 0
+}
+
+func (x *FunctionNode) GetP99InitDurationMs() float64 {
+	if x != nil {
+		return x.P99InitDurationMs
 	}
 	return 0
 }
@@ -404,7 +430,7 @@ var File_proto_graph_proto protoreflect.FileDescriptor
 
 const file_proto_graph_proto_rawDesc = "" +
 	"\n" +
-	"\x11proto/graph.proto\x12\x11optifuse.graph.v1\"\xe0\x05\n" +
+	"\x11proto/graph.proto\x12\x11optifuse.graph.v1\"\xc2\x06\n" +
 	"\fFunctionNode\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x1b\n" +
@@ -423,7 +449,9 @@ const file_proto_graph_proto_rawDesc = "" +
 	"\n" +
 	"error_rate\x18\x17 \x01(\x01R\terrorRate\x12$\n" +
 	"\x0ep99_latency_ms\x18\x18 \x01(\x01R\fp99LatencyMs\x12&\n" +
-	"\x0fcold_start_rate\x18\x19 \x01(\x01R\rcoldStartRate\x1a>\n" +
+	"\x0fcold_start_rate\x18\x19 \x01(\x01R\rcoldStartRate\x12/\n" +
+	"\x14avg_init_duration_ms\x18\x1a \x01(\x01R\x11avgInitDurationMs\x12/\n" +
+	"\x14p99_init_duration_ms\x18\x1b \x01(\x01R\x11p99InitDurationMs\x1a>\n" +
 	"\x10EnvironmentEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\x1a?\n" +

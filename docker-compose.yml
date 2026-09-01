@@ -19,7 +19,16 @@ services:
       POSTGRES_PASSWORD: secretpassword
       POSTGRES_DB: optifuse_db
     volumes:
-      # Mounts the schema to automatically create tables on first run
+      # Named volume so the database survives `docker compose down`.
+      #
+      # Without this, every teardown regenerated each profile's aws_external_id
+      # (schema.sql defaults it to uuid_generate_v4()), which silently breaks the
+      # CloudFormation trust policy the customer already deployed. The symptom is
+      # an AssumeRole 403 that looks like a customer misconfiguration.
+      #
+      # `docker compose down` keeps named volumes; only `down -v` removes them.
+      - optifuse-db-data:/var/lib/postgresql/data
+      # Runs only when the data directory is empty, i.e. on first creation.
       - ./services/gateway/internal/db/schema.sql:/docker-entrypoint-initdb.d/schema.sql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U optifuse -d optifuse_db"]
@@ -37,6 +46,8 @@ services:
     ports:
       - "50051:50051"   # gRPC (internal only in prod; exposed here for debugging)
       - "9091:9090"     # Prometheus metrics
+    environment:
+      - LOG_LEVEL=${LOG_LEVEL:-info}
     healthcheck:
       test: ["CMD-SHELL", "nc -z 127.0.0.1 50051 || exit 1"]
       interval: 10s
@@ -62,6 +73,7 @@ services:
       - "50052:50052"
       - "9092:9090"     # Prometheus metrics
     environment:
+      - LOG_LEVEL=${LOG_LEVEL:-info}
       - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
       - AWS_REGION=${AWS_REGION}
@@ -84,6 +96,8 @@ services:
     ports:
       - "50053:50053"
       - "9093:9090"     # Prometheus metrics
+    environment:
+      - LOG_LEVEL=${LOG_LEVEL:-info}
     healthcheck:
       test: ["CMD-SHELL", "nc -z 127.0.0.1 50053 || exit 1"]
       interval: 10s
@@ -118,6 +132,7 @@ services:
       - "8080:8080"   # REST API — frontend points here
       - "9094:9090"   # Prometheus metrics (never exposed publicly in prod)
     environment:
+      - LOG_LEVEL=${LOG_LEVEL:-info}
       - PARSER_ADDR=parser:50051
       - ENRICHER_ADDR=enricher:50052
       - OPTIMIZER_ADDR=optimizer:50053
@@ -139,3 +154,6 @@ services:
       interval: 10s
       timeout: 5s
       retries: 3
+
+volumes:
+  optifuse-db-data:

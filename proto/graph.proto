@@ -37,6 +37,19 @@ message FunctionNode {
   double error_rate         = 23;
   double p99_latency_ms     = 24;
   double cold_start_rate    = 25;
+
+  // ── Cold start telemetry ───────────────────────────────────────────────────
+  // "Init duration" is the INIT phase of a cold start: booting the runtime,
+  // loading the handler module and running top-level code. CloudWatch emits it
+  // in the REPORT line ONLY when the invocation was a cold start, which is how
+  // cold_start_rate above is derived (cold starts / total invocations).
+  //
+  // Init is a property of the code and its memory setting, not of traffic, so
+  // it is stable enough to measure once and reuse. p99 matters more than the
+  // average here: the whole cold start argument is about tail latency, and an
+  // average hides exactly the tail that provisioned concurrency exists to fix.
+  double avg_init_duration_ms = 26;
+  double p99_init_duration_ms = 27;
 }
 
 // Directed edge between two function nodes.

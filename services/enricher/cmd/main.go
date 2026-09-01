@@ -75,8 +75,12 @@ func (s *server) Enrich(ctx context.Context, req *pb.EnrichRequest) (*pb.EnrichR
 			log.Debug("enriched function",
 				"id", id,
 				"avg_duration_ms", node.AvgDurationMs,
+				"p99_duration_ms", node.P99LatencyMs,
 				"avg_memory_mb", node.AvgMemoryUsedMb,
 				"invocations", node.InvocationCount,
+				"cold_start_rate", node.ColdStartRate,
+				"avg_init_ms", node.AvgInitDurationMs,
+				"p99_init_ms", node.P99InitDurationMs,
 			)
 		}
 	}

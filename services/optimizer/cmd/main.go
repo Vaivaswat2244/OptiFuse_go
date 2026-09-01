@@ -206,6 +206,9 @@ func graphToApp(g *pb.Graph) (*domain.Application, error) {
 			ErrorRate:       node.ErrorRate,
 			P99LatencyMs:    node.P99LatencyMs,
 			ColdStartRate:   node.ColdStartRate,
+
+			AvgInitDurationMs: node.AvgInitDurationMs,
+			P99InitDurationMs: node.P99InitDurationMs,
 		}
 		fm[id] = lf
 	}
