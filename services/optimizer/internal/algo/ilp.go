@@ -15,17 +15,24 @@ import (
 //
 // Python: def mtx_ilp(app: Application) -> dict  (in optimal.py, uses PuLP/CBC)
 //
-// This is the only algorithm that guarantees an optimal solution.
-// It formulates the fusion problem as a Mixed Integer Linear Program:
+// This is the only algorithm that guarantees an optimal solution under the
+// cost model in domain.CalculateMetrics. It formulates fusion as a Mixed
+// Integer Linear Program:
 //
-//   Minimize: sum over cut edges of data_transfer_cost(u→v) * is_cut[u,v]
+//   Minimize: request charge on every cut parent edge
+//           + execution charge, with each member billed at its group's memory
+//           + data transfer on cut edges (zero in-region)
 //   Subject to:
 //     - Every function is assigned to exactly one group (root)
 //     - Root integrity: x[b,f] ≤ x[b,b]  (can only assign f to b if b is a root)
-//     - Memory: sum(memory[f] * x[b,f]) ≤ max_memory * x[b,b]  for all b
+//     - Group memory: m[b] ≥ mem[f] · x[b,f]  (the max, linearised)
+//     - Tiering:      y[b,f] ≥ m[b] − M(1 − x[b,f])  (members billed at m[b])
 //     - Cut definition: is_cut[u,v] ≥ |x[b,u] - x[b,v]|  for all b, (u,v)
 //     - Latency: runtime_sum + sum(hop_delay * is_cut[u,v]) ≤ max_latency
 //                where the sum is over critical path edges
+//
+// Optimal here means the cheapest partition that meets the latency cap. It
+// does not trade cost against latency; the frontier does that across all six.
 //
 // SOLVER STRATEGY:
 // PuLP wraps CBC (COIN-B&B). In Go we have two options:

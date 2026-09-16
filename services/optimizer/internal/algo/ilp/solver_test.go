@@ -10,12 +10,11 @@ import (
 	"github.com/Vaivaswat2244/OptiFuse_go/services/optimizer/internal/domain"
 )
 
-// buildChainApp returns A -> B -> C, all 512MB / 100ms, with a heavy edge from
-// A to B and a light one from B to C.
+// buildChainApp returns A -> B -> C, all 512MB / 100ms.
 //
-// The optimum is unambiguous: memory caps a group at two functions, so exactly
-// one edge can be internalised, and internalising the 10 MiB edge beats the
-// 1 MiB one. Expected partition: {A, B} and {C}.
+// The optimum is unambiguous: every member is on the same tier, so fusing costs
+// nothing in execution and each internalised edge saves one request charge.
+// Latency stays at 300ms against a 400ms cap. Expected partition: {A, B, C}.
 func buildChainApp() *domain.Application {
 	newFn := func(id string) *domain.LambdaFunction {
 		return &domain.LambdaFunction{
@@ -226,10 +225,105 @@ func TestSolve_FindsKnownOptimum(t *testing.T) {
 	}
 	sort.Strings(got)
 
-	// Internalising alpha->beta (10 MiB) beats beta->gamma (1 MiB), and the
-	// 1024MB cap forbids taking both.
-	want := []string{"alpha+beta", "gamma"}
+	want := []string{"alpha+beta+gamma"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("optimal partition = %v, want %v", got, want)
+	}
+}
+
+// buildMismatchedApp returns a chain where the middle function is a 1769MB
+// hop between two long-running 128MB functions:
+//
+//	alpha (128MB, 1000ms) -> beta (1769MB, 10ms) -> gamma (128MB, 1000ms)
+//
+// Fusing either neighbour with beta re-tiers a full second of work from 128MB
+// to 1769MB, roughly $2.7e-5 of execution against a $2e-7 request saving.
+// Fusing alpha with gamma directly is impossible (no edge), so the only
+// profitable partition is no fusion at all.
+func buildMismatchedApp() *domain.Application {
+	newFn := func(id string, mem, ms int) *domain.LambdaFunction {
+		return &domain.LambdaFunction{
+			ID: id, Name: id, MemoryMB: mem, TimeoutSec: 1, LoadFactor: 1.0,
+			AvgDurationMs: float64(ms), DataOutBytes: make(map[string]int64),
+		}
+	}
+	a, b, c := newFn("alpha", 128, 1000), newFn("beta", 1769, 10), newFn("gamma", 128, 1000)
+	a.AddChild(b, 0)
+	b.AddChild(c, 0)
+
+	return &domain.Application{
+		Name:            "mismatched",
+		Functions:       []*domain.LambdaFunction{a, b, c},
+		CriticalPathIDs: []string{"alpha", "beta", "gamma"},
+		MaxMemoryMB:     3008,
+		MaxLatencyMS:    5000,
+		NetworkHopMS:    10,
+	}
+}
+
+// The regression this guards: with cut-transfer as the only objective term the
+// solver had nothing to minimise once transfer was zero, and returned an
+// arbitrary partition. With execution in the objective it must refuse a merge
+// that costs 100x what it saves.
+func TestSolve_RefusesUnprofitableRetiering(t *testing.T) {
+	if _, err := exec.LookPath("glpsol"); err != nil {
+		t.Skip("glpsol not installed — skipping solver round-trip")
+	}
+
+	app := buildMismatchedApp()
+	result, err := Solve(app)
+	if err != nil {
+		t.Fatalf("Solve returned an error: %v", err)
+	}
+	if !result.Optimal {
+		t.Fatalf("solver did not reach optimality: %s", result.Status)
+	}
+	if len(result.Groups) != 3 {
+		t.Fatalf("got %d groups, want 3 singletons: %v", len(result.Groups), groupIDs(result.Groups))
+	}
+
+	// And the model's own accounting must agree that nothing cheaper existed.
+	cost := app.CalculateMetrics(result.Groups).TotalCostUSD
+	all := [][]*domain.LambdaFunction{app.Functions}
+	if fused := app.CalculateMetrics(all).TotalCostUSD; fused <= cost {
+		t.Errorf("full fusion costs %g, singletons %g; fixture does not exercise the penalty", fused, cost)
+	}
+}
+
+func groupIDs(groups [][]*domain.LambdaFunction) []string {
+	out := make([]string, 0, len(groups))
+	for _, g := range groups {
+		ids := make([]string, len(g))
+		for i, f := range g {
+			ids[i] = f.ID
+		}
+		out = append(out, strings.Join(ids, "+"))
+	}
+	return out
+}
+
+// The objective must carry both charges. A model whose objective is only cut
+// variables is the zero-transfer bug again; one with only tiering variables
+// would never see a reason to fuse.
+func TestBuildLP_ObjectivePricesRequestsAndExecution(t *testing.T) {
+	lp, _ := buildLP(buildChainApp())
+
+	objective, _, found := strings.Cut(lp, "Subject To\n")
+	if !found {
+		t.Fatal("LP has no Subject To section")
+	}
+	if !strings.Contains(objective, " c_") {
+		t.Error("objective has no cut (request) terms")
+	}
+	if !strings.Contains(objective, " y_") {
+		t.Error("objective has no tiering (execution) terms")
+	}
+	if strings.Contains(lp, "excl_") {
+		t.Error("pairwise exclusions are still emitted; the objective prices re-tiering now")
+	}
+	for _, name := range []string{"mem_0_0:", "tier_0_0:"} {
+		if !strings.Contains(lp, name) {
+			t.Errorf("LP is missing the %s constraint", name)
+		}
 	}
 }

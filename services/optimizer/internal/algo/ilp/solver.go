@@ -98,7 +98,7 @@ func writeStatement(sb *strings.Builder, label string, terms []term, suffix stri
 }
 
 // formatCoef renders a coefficient in a form the LP reader accepts. %.12g keeps
-// small data-transfer costs (order 1e-9) from being flattened to zero.
+// small coefficients from being flattened to zero.
 func formatCoef(c float64) string {
 	return strconv.FormatFloat(c, 'g', 12, 64)
 }
@@ -132,6 +132,11 @@ func buildLP(app *domain.Application) (string, []dirEdge) {
 	}
 	xVar := func(b, f int) string { return fmt.Sprintf("x_%d_%d", b, f) }
 	cVar := func(e int) string { return fmt.Sprintf("c_%d", e) }
+	// m_<b>   = memory (in GB) of the group rooted at b: the largest member
+	// y_<b>_<f> = m_<b> if f is in b's group, else 0
+	// Both continuous. See the objective for why they exist.
+	mVar := func(b int) string { return fmt.Sprintf("m_%d", b) }
+	yVar := func(b, f int) string { return fmt.Sprintf("y_%d_%d", b, f) }
 
 	// Collect all directed edges, and index them so the latency constraint can
 	// refer to the same variable as the cut constraints.
@@ -160,16 +165,63 @@ func buildLP(app *domain.Application) (string, []dirEdge) {
 	var sb strings.Builder
 	sb.WriteString("\\* OptiFuse fusion model *\\\n")
 
-	// ── Objective: minimize data transfer cost on cut edges ──────────────────
-	// Python: prob += lpSum(u.get_data_transfer_cost(v.id) * is_cut[u.id, v.id] for u, v in all_edges)
+	// ── Objective: the per-invocation bill, as CalculateMetrics computes it ──
+	//
+	// Two charges, both real:
+	//
+	//   requests   Σ over functions v that the platform has to invoke:
+	//              RequestPriceUSD × rate(v). Everything except the entry is
+	//              invoked by its parent, so v is platform-invoked exactly when
+	//              its parent edge is cut. The entry always pays and is a constant
+	//              the solver need not see.
+	//
+	//   execution  Σ over groups: price × groupGB × Σ runtime(member). Group
+	//              memory is the largest member, which is a max and not linear.
+	//              m_b ≥ memGB(f)·x[b,f] pins m_b to at least the max, and
+	//              y[b,f] ≥ m_b − bigM·(1 − x[b,f]) makes y equal m_b for members
+	//              and free (so zero, under minimisation) for non-members. The
+	//              objective then charges Σ runtime(f)·y[b,f], which is linear.
+	//              Minimisation drives m_b and y down to exactly the max, so no
+	//              upper bounds are needed.
+	//
+	//   transfer   on cut edges, kept for completeness; zero in-region.
+	//
+	// The previous objective was cut-transfer alone, which is identically zero
+	// now that in-region transfer is known to be free. The solver was then
+	// returning whichever partition it hit first, and every run so far had it
+	// dominated.
+	//
+	// Everything is scaled to USD per million invocations. The raw figures are
+	// order 1e-7 and sit inside GLPK's default tolerances, where the solver
+	// cannot tell one partition from another. Scaling changes nothing about
+	// which partition is optimal.
+	const perMillion = 1e6
+	memGB := func(f *domain.LambdaFunction) float64 { return float64(f.MemoryMB) / 1024.0 }
+	bigM := 0.0
+	for _, f := range funcs {
+		if memGB(f) > bigM {
+			bigM = memGB(f)
+		}
+	}
+
 	obj := newExpr()
 	for i, e := range edges {
-		obj.add(e.u.DataTransferCostUSD(e.v.ID), cVar(i))
+		coef := e.u.DataTransferCostUSD(e.v.ID)
+		if e.v.Parent != nil && e.v.Parent.ID == e.u.ID {
+			coef += domain.RequestPriceUSD * e.v.Rate()
+		}
+		obj.add(coef*perMillion, cVar(i))
+	}
+	for b := range funcs {
+		for f, fn := range funcs {
+			seconds := float64(fn.RuntimeMs()) / 1000.0
+			obj.add(domain.ExecutionPriceUSDPerGBSecond*seconds*perMillion, yVar(b, f))
+		}
 	}
 	sb.WriteString("Minimize\n")
 	if obj.empty() {
-		// Every edge carries zero bytes. Keep the model well-formed by scoring
-		// the first cut variable at zero rather than emitting a bare label.
+		// Cannot happen while there is an edge (its request term is positive),
+		// but keep the model well-formed rather than emit a bare label.
 		writeStatement(&sb, "obj:", []term{{0, cVar(0)}}, "")
 	} else {
 		writeStatement(&sb, "obj:", obj.terms(), "")
@@ -202,15 +254,40 @@ func buildLP(app *domain.Application) (string, []dirEdge) {
 		}
 	}
 
-	// 3. Memory per group: sum(mem[f] * x[b,f]) <= maxMemory * x[b,b].
-	// Python: prob += lpSum(f.memory * x[b.id, f.id] for f in app.functions) <= max_memory * x[b.id, b.id]
+	// 3. Group memory. m_b is at least every member's memory; the objective
+	// pushes it down to exactly the largest. For a b that is not a root every
+	// x[b,f] is zero and m_b settles at zero.
 	for b := range funcs {
-		e := newExpr()
 		for f, fn := range funcs {
-			e.add(float64(fn.MemoryMB), xVar(b, f))
+			e := newExpr()
+			e.add(1, mVar(b))
+			e.add(-memGB(fn), xVar(b, f))
+			writeStatement(&sb, fmt.Sprintf("mem_%d_%d:", b, f), e.terms(), " >= 0")
 		}
-		e.add(-float64(app.MaxMemoryMB), xVar(b, b))
-		writeStatement(&sb, fmt.Sprintf("mem_%d:", b), e.terms(), " <= 0")
+	}
+
+	// 3b. Charge every member at its group's memory: y[b,f] ≥ m_b − bigM(1 − x[b,f]).
+	// With x[b,f] = 1 this is y ≥ m_b; with x[b,f] = 0 the right side is ≤ 0 and
+	// y's default lower bound of zero takes over.
+	//
+	// This is where the re-tiering penalty enters. A 128MB function fused with a
+	// 1024MB one gets y = 1GB for its whole runtime instead of 0.125GB, and the
+	// objective sees the difference. The greedy solvers get the same effect from
+	// MergeIsProfitable; here it is exact rather than pairwise, so a merge that
+	// looks bad in isolation but pays off inside a larger group is still found.
+	//
+	// There is no separate cap constraint. A fused function is provisioned for
+	// its heaviest member, so it fits Lambda's limit whenever that member does
+	// on its own, which is a property of the input rather than of the partition.
+	for b := range funcs {
+		for f := range funcs {
+			e := newExpr()
+			e.add(1, yVar(b, f))
+			e.add(-1, mVar(b))
+			e.add(-bigM, xVar(b, f))
+			writeStatement(&sb, fmt.Sprintf("tier_%d_%d:", b, f), e.terms(),
+				fmt.Sprintf(" >= %s", formatCoef(-bigM)))
+		}
 	}
 
 	// 4. Cut definition: c[e] >= x[b,u] - x[b,v] and c[e] >= x[b,v] - x[b,u].
@@ -259,6 +336,8 @@ func buildLP(app *domain.Application) (string, []dirEdge) {
 	}
 
 	// ── Binary declarations ───────────────────────────────────────────────────
+	// m_ and y_ are continuous and non-negative, which is the LP reader's
+	// default for an undeclared variable, so only the binaries are listed.
 	sb.WriteString("Binary\n")
 	for b := range funcs {
 		for f := range funcs {
@@ -287,8 +366,8 @@ func Solve(app *domain.Application) (*Result, error) {
 
 	lpText, edges := buildLP(app)
 
-	// No edges means every feasible partition scores zero, so singletons are as
-	// optimal as anything else.
+	// No edges means nothing can be fused without re-tiering for no request
+	// saving, so singletons are optimal.
 	if len(edges) == 0 {
 		groups := make([][]*domain.LambdaFunction, len(funcs))
 		for i, f := range funcs {
