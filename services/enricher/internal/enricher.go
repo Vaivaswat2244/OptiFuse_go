@@ -3,6 +3,8 @@ package enricher
 import (
 	"context"
 	"fmt"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -77,6 +79,29 @@ func (e *Enricher) Enrich(ctx context.Context, graph *pb.Graph, roleARN, externa
 	return graph, enrichedIDs, missingIDs, nil
 }
 
+// lookbackWindow is how far back the Logs Insights query reaches.
+//
+// This was 24 hours, which silently returns nothing for a low-traffic
+// application: an app invoked a dozen times a day may have no REPORT records at
+// all in the last day, and the enricher then reports every function as missing
+// and falls back to the YAML estimates. That looks identical to a permissions
+// failure, and low-traffic apps are exactly the ones worth optimising.
+//
+// Cold starts make it worse. They are rare by nature, so a 24-hour window can
+// contain invocations but no init records, leaving init duration unmeasurable
+// on an app that is being used.
+//
+// Seven days by default, overridable with CLOUDWATCH_LOOKBACK_HOURS.
+func lookbackWindow() time.Duration {
+	const defaultHours = 24 * 7
+	if v := os.Getenv("CLOUDWATCH_LOOKBACK_HOURS"); v != "" {
+		if h, err := strconv.Atoi(v); err == nil && h > 0 {
+			return time.Duration(h) * time.Hour
+		}
+	}
+	return defaultHours * time.Hour
+}
+
 // functionMetrics holds the CloudWatch data for a single function.
 type functionMetrics struct {
 	avgDurationMs   float64
@@ -119,7 +144,7 @@ func queryCloudWatch(ctx context.Context, cfg aws.Config, logGroups, functionIDs
 	client := cloudwatchlogs.NewFromConfig(cfg)
 
 	end := time.Now()
-	start := end.Add(-24 * time.Hour)
+	start := end.Add(-lookbackWindow())
 
 	// REPORT records are emitted for every single invocation and are never
 	// sampled, unlike X-Ray traces (whose default rule keeps one request per
