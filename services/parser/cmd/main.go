@@ -102,9 +102,10 @@ func (s *server) Parse(ctx context.Context, req *pb.ParseRequest) (*pb.ParseResp
 			Edges:        edges,
 			CriticalPath: parsed.CriticalPath,
 			Constraints: &pb.Constraints{
-				MaxMemoryMb:  int32(parsed.MaxMemoryMB),
-				MaxLatencyMs: int32(parsed.MaxLatencyMS),
-				NetworkHopMs: int32(parsed.NetworkHopMS),
+				MaxMemoryMb:           int32(parsed.MaxMemoryMB),
+				MaxLatencyMs:          int32(parsed.MaxLatencyMS),
+				NetworkHopMs:          int32(parsed.NetworkHopMS),
+				DataTransferUsdPerGib: parsed.DataTransferUSDPerGiB,
 			},
 		},
 		Warnings:    parsed.Warnings,

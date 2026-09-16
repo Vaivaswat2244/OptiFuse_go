@@ -77,6 +77,12 @@ type ConstraintSpec struct {
 	MaxMemoryMB  int `yaml:"maxMemoryMB"`
 	MaxLatencyMS int `yaml:"maxLatencyMS"`
 	NetworkHopMS int `yaml:"networkHopMS"`
+
+	// DataTransferUSDPerGiB prices bytes on cut edges. Defaults to 0, because
+	// AWS does not bill data transfer for Lambda-to-Lambda invocation inside a
+	// single region. Set it only when calls genuinely cross a region or leave
+	// AWS, where EC2 transfer rates apply.
+	DataTransferUSDPerGiB float64 `yaml:"dataTransferUSDPerGiB"`
 }
 
 // ParsedFunction is an intermediate representation before proto conversion.
@@ -108,13 +114,14 @@ type ParsedGraph struct {
 	ServiceName string
 	// Stage is `provider.stage`, the other half of the log group name.
 	// Defaults to "dev", matching the Serverless Framework's own default.
-	Stage        string
-	Functions    []*ParsedFunction
-	CriticalPath []string
-	MaxMemoryMB  int
-	MaxLatencyMS int
-	NetworkHopMS int
-	Warnings     []string
+	Stage                 string
+	Functions             []*ParsedFunction
+	CriticalPath          []string
+	MaxMemoryMB           int
+	MaxLatencyMS          int
+	NetworkHopMS          int
+	DataTransferUSDPerGiB float64
+	Warnings              []string
 }
 
 // Parse takes raw serverless.yml bytes and a repo name, and returns a ParsedGraph.
@@ -250,7 +257,9 @@ func Parse(repoName string, yamlContent []byte) (*ParsedGraph, error) {
 		MaxMemoryMB:  maxMem,
 		MaxLatencyMS: maxLat,
 		NetworkHopMS: netHop,
-		Warnings:     warnings,
+		// No default: zero is the correct price for same-region calls.
+		DataTransferUSDPerGiB: spec.Custom.OptiFuse.Constraints.DataTransferUSDPerGiB,
+		Warnings:              warnings,
 	}
 
 	return graph, nil

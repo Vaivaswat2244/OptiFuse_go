@@ -177,14 +177,16 @@ func (g *GreedyTP) Optimize(app *domain.Application) AlgorithmResult {
 			safeGroups = append(safeGroups, g)
 			continue
 		}
-		// Greedily keep functions until memory would be exceeded, eject the rest.
+		// Keep functions the fused group can actually hold, eject the rest.
+		// The group's memory is the largest member, not the running total, so a
+		// function only forces an ejection when it alone exceeds the limit.
 		var kept []*domain.LambdaFunction
 		usedMem := 0
 		var ejected []*domain.LambdaFunction
 		for _, f := range g {
-			if usedMem+f.MemoryMB <= app.MaxMemoryMB {
+			if max(usedMem, f.MemoryMB) <= app.MaxMemoryMB {
 				kept = append(kept, f)
-				usedMem += f.MemoryMB
+				usedMem = max(usedMem, f.MemoryMB)
 			} else {
 				ejected = append(ejected, f)
 			}
@@ -247,7 +249,11 @@ func (g *GreedyTP) Optimize(app *domain.Application) AlgorithmResult {
 		if !pOK || !cOK || parentIdx == childIdx {
 			continue
 		}
-		if domain.GroupMemory(groups[parentIdx])+domain.GroupMemory(groups[childIdx]) <= app.MaxMemoryMB {
+		// Same two gates as MinWCut: the fused function must fit the memory limit
+		// (max, not sum, since that is what Lambda provisions), and the merge must
+		// save more transfer than the re-tiering costs in execution.
+		fits := max(domain.GroupMemory(groups[parentIdx]), domain.GroupMemory(groups[childIdx])) <= app.MaxMemoryMB
+		if fits && domain.MergeIsProfitable(groups[parentIdx], groups[childIdx]) {
 			groups[parentIdx] = append(groups[parentIdx], groups[childIdx]...)
 			groups = domain.RemoveIndex(groups, childIdx)
 		}

@@ -145,8 +145,23 @@ func (c *CostlessCSP) Optimize(app *domain.Application) AlgorithmResult {
 		u := fm[uID]
 
 		// ── Option A: MERGE v into current group ─────────────────────────────
+		// Group memory is the largest member, not the running total, since that
+		// is what Lambda provisions for a fused function.
+		//
+		// The profitability gate stops a merge that saves less transfer than the
+		// re-tiering costs in execution. Without it this search would fold a light
+		// branch into a heavy one for any transfer saving at all, however small.
 		// Python: if u_label.current_group_mem + v.memory <= app.max_memory:
-		if uLabel.currentGroupMem+v.MemoryMB <= app.MaxMemoryMB {
+		lastGroup := uLabel.partitioning[len(uLabel.partitioning)-1]
+		groupFns := make([]*domain.LambdaFunction, 0, len(lastGroup))
+		for _, id := range lastGroup {
+			if f, ok := fm[id]; ok {
+				groupFns = append(groupFns, f)
+			}
+		}
+
+		fits := max(uLabel.currentGroupMem, v.MemoryMB) <= app.MaxMemoryMB
+		if fits && domain.MergeIsProfitable(groupFns, []*domain.LambdaFunction{v}) {
 			newPart := uLabel.clonePartitioning()
 			// Append v to the last group.
 			// Python: new_part_merge[-1] += (v,)
@@ -156,7 +171,7 @@ func (c *CostlessCSP) Optimize(app *domain.Application) AlgorithmResult {
 			mergeLabel := &cspLabel{
 				cost:            uLabel.cost,
 				latency:         uLabel.latency + v.RuntimeMs(),
-				currentGroupMem: uLabel.currentGroupMem + v.MemoryMB,
+				currentGroupMem: max(uLabel.currentGroupMem, v.MemoryMB),
 				partitioning:    newPart,
 			}
 

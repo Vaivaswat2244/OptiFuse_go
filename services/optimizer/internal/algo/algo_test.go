@@ -157,12 +157,35 @@ func TestSingleton_AllFunctionsPresent(t *testing.T) {
 	}
 }
 
-func TestSingleton_Infeasible(t *testing.T) {
+// This test used to assert the opposite, on the reasoning that the six members
+// total 2176MB and so breach the 1024MB cap. That reasoning was wrong: Lambda
+// allocates memory per function, so fusing all six produces one function sized
+// to its heaviest member, 512MB, which fits the cap comfortably.
+//
+// The old sum-based model made full fusion look impossible when it is merely
+// expensive: running the 128MB and 256MB members at 512MB costs more than the
+// request charges it saves. Feasible and unwise are different answers, and the
+// model should be able to tell them apart.
+func TestSingleton_FeasibleWhenHeaviestMemberFits(t *testing.T) {
 	app := buildImageProcessingApp()
 	result := (&algo.Singleton{}).Optimize(app)
-	// Total memory: 256+512+512+256+512+128 = 2176MB > 1024MB → infeasible.
+
+	if !result.Metrics.Feasible {
+		t.Errorf("Singleton: expected feasible (heaviest member 512MB is under the 1024MB limit)")
+	}
+	if got := domain.GroupMemory(result.Groups[0]); got != 512 {
+		t.Errorf("fused group memory = %dMB, want 512MB (the largest member)", got)
+	}
+}
+
+// A group whose heaviest member alone exceeds the cap is genuinely infeasible.
+func TestSingleton_InfeasibleWhenOneMemberExceedsCap(t *testing.T) {
+	app := buildImageProcessingApp()
+	app.MaxMemoryMB = 256 // below the 512MB members
+
+	result := (&algo.Singleton{}).Optimize(app)
 	if result.Metrics.Feasible {
-		t.Errorf("Singleton: expected infeasible (total memory 2176MB > 1024MB limit)")
+		t.Errorf("Singleton: expected infeasible when a single member exceeds the cap")
 	}
 }
 
@@ -337,20 +360,61 @@ func TestCostlessCSP_AllFunctionsAssigned(t *testing.T) {
 
 // ── Cost ordering: fused solutions should cost less than NoFusion ─────────────
 
-func TestCostOrdering_FusionCheaperThanNoFusion(t *testing.T) {
-	app := buildImageProcessingApp()
+// Fusion is not unconditionally cheaper, and this test used to assert that it
+// was. It passed only because the model charged $0.01/GiB for data transfer on
+// every cut edge, a charge AWS confirmed it does not levy for Lambda-to-Lambda
+// invocation inside one region. With that term gone, fusion trades a saved
+// request charge against a higher execution charge, because every member of a
+// block runs at the block's memory rather than its own.
+//
+// On this application the members are sized 128 to 512MB, so re-tiering costs
+// more than the request charge saves and refusing to fuse is correct. What the
+// algorithms must guarantee is that they never make things worse.
+func TestFusionNeverWorseThanNoFusion(t *testing.T) {
+	for name, app := range map[string]*domain.Application{
+		"image-processing": buildImageProcessingApp(),
+		"ecommerce":        buildEcommerceApp(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			noFusion := (&algo.NoFusion{}).Optimize(app)
+			for _, r := range []algo.AlgorithmResult{
+				(&algo.MinWCut{}).Optimize(app),
+				(&algo.GreedyTP{}).Optimize(app),
+				(&algo.CostlessCSP{}).Optimize(app),
+			} {
+				if r.Error != "" {
+					continue
+				}
+				if r.Metrics.TotalCostUSD > noFusion.Metrics.TotalCostUSD {
+					t.Errorf("%s: cost %.8f exceeds NoFusion %.8f",
+						r.Name, r.Metrics.TotalCostUSD, noFusion.Metrics.TotalCostUSD)
+				}
+			}
+		})
+	}
+}
+
+// Where members are sized alike, re-tiering costs nothing and the saved request
+// charge is pure profit, so fusion must win. Every ecommerce function is 512MB,
+// which makes it the case that isolates the request charge as the mechanism.
+func TestFusionWinsWhenMembersAreSizedAlike(t *testing.T) {
+	app := buildEcommerceApp()
 	noFusion := (&algo.NoFusion{}).Optimize(app)
 	minWCut := (&algo.MinWCut{}).Optimize(app)
-	greedyTP := (&algo.GreedyTP{}).Optimize(app)
-	csp := (&algo.CostlessCSP{}).Optimize(app)
 
-	for _, r := range []algo.AlgorithmResult{minWCut, greedyTP, csp} {
-		if r.Error != "" {
-			continue
-		}
-		if r.Metrics.TotalCostUSD >= noFusion.Metrics.TotalCostUSD {
-			t.Errorf("%s: expected cost (%.8f) < NoFusion cost (%.8f)",
-				r.Name, r.Metrics.TotalCostUSD, noFusion.Metrics.TotalCostUSD)
-		}
+	if minWCut.Metrics.TotalCostUSD >= noFusion.Metrics.TotalCostUSD {
+		t.Fatalf("MinWCut cost %.8f should beat NoFusion %.8f when all members are 512MB",
+			minWCut.Metrics.TotalCostUSD, noFusion.Metrics.TotalCostUSD)
+	}
+
+	// The entire saving should be the request charges for invocations that no
+	// longer cross the platform.
+	saved := noFusion.Metrics.TotalCostUSD - minWCut.Metrics.TotalCostUSD
+	removedInvocations := len(app.Functions) - len(minWCut.Groups)
+	want := domain.RequestPriceUSD * float64(removedInvocations)
+
+	if diff := saved - want; diff > 1e-12 || diff < -1e-12 {
+		t.Errorf("saving %.10f != %d removed invocations x %.10f = %.10f",
+			saved, removedInvocations, domain.RequestPriceUSD, want)
 	}
 }

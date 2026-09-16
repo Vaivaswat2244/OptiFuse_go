@@ -289,12 +289,22 @@ func (x *Edge) GetCostUsd() float64 {
 // Constraints on the application — from the custom.optifuse block in serverless.yml.
 // Corresponds to the constraint fields on Application in structures.py.
 type Constraints struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	MaxMemoryMb   int32                  `protobuf:"varint,1,opt,name=max_memory_mb,json=maxMemoryMb,proto3" json:"max_memory_mb,omitempty"`    // default 1024
-	MaxLatencyMs  int32                  `protobuf:"varint,2,opt,name=max_latency_ms,json=maxLatencyMs,proto3" json:"max_latency_ms,omitempty"` // default 30000
-	NetworkHopMs  int32                  `protobuf:"varint,3,opt,name=network_hop_ms,json=networkHopMs,proto3" json:"network_hop_ms,omitempty"` // default 20 — latency added per cross-group call
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	MaxMemoryMb  int32                  `protobuf:"varint,1,opt,name=max_memory_mb,json=maxMemoryMb,proto3" json:"max_memory_mb,omitempty"`    // default 1024
+	MaxLatencyMs int32                  `protobuf:"varint,2,opt,name=max_latency_ms,json=maxLatencyMs,proto3" json:"max_latency_ms,omitempty"` // default 30000
+	NetworkHopMs int32                  `protobuf:"varint,3,opt,name=network_hop_ms,json=networkHopMs,proto3" json:"network_hop_ms,omitempty"` // default 20 — latency added per cross-group call
+	// Price of data on a cut edge. Defaults to 0.
+	//
+	// AWS confirmed that data transfer for Lambda-to-Lambda invocation within one
+	// region is NOT billed: the payload travels through the Lambda service's own
+	// internal infrastructure inside the region. The model previously charged
+	// $0.01/GiB on every cut edge, which was the entire cost saving it reported.
+	//
+	// Kept as a knob because the charge is real when calls genuinely cross a
+	// region or leave AWS, where EC2 transfer rates apply.
+	DataTransferUsdPerGib float64 `protobuf:"fixed64,4,opt,name=data_transfer_usd_per_gib,json=dataTransferUsdPerGib,proto3" json:"data_transfer_usd_per_gib,omitempty"`
+	unknownFields         protoimpl.UnknownFields
+	sizeCache             protoimpl.SizeCache
 }
 
 func (x *Constraints) Reset() {
@@ -344,6 +354,13 @@ func (x *Constraints) GetMaxLatencyMs() int32 {
 func (x *Constraints) GetNetworkHopMs() int32 {
 	if x != nil {
 		return x.NetworkHopMs
+	}
+	return 0
+}
+
+func (x *Constraints) GetDataTransferUsdPerGib() float64 {
+	if x != nil {
+		return x.DataTransferUsdPerGib
 	}
 	return 0
 }
@@ -463,11 +480,12 @@ const file_proto_graph_proto_rawDesc = "" +
 	"\x02to\x18\x02 \x01(\tR\x02to\x12\x1d\n" +
 	"\n" +
 	"data_bytes\x18\x03 \x01(\x03R\tdataBytes\x12\x19\n" +
-	"\bcost_usd\x18\x04 \x01(\x01R\acostUsd\"}\n" +
+	"\bcost_usd\x18\x04 \x01(\x01R\acostUsd\"\xb7\x01\n" +
 	"\vConstraints\x12\"\n" +
 	"\rmax_memory_mb\x18\x01 \x01(\x05R\vmaxMemoryMb\x12$\n" +
 	"\x0emax_latency_ms\x18\x02 \x01(\x05R\fmaxLatencyMs\x12$\n" +
-	"\x0enetwork_hop_ms\x18\x03 \x01(\x05R\fnetworkHopMs\"\xc7\x02\n" +
+	"\x0enetwork_hop_ms\x18\x03 \x01(\x05R\fnetworkHopMs\x128\n" +
+	"\x19data_transfer_usd_per_gib\x18\x04 \x01(\x01R\x15dataTransferUsdPerGib\"\xc7\x02\n" +
 	"\x05Graph\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x129\n" +
 	"\x05nodes\x18\x02 \x03(\v2#.optifuse.graph.v1.Graph.NodesEntryR\x05nodes\x12-\n" +

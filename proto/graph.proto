@@ -69,6 +69,17 @@ message Constraints {
   int32  max_memory_mb     = 1;  // default 1024
   int32  max_latency_ms    = 2;  // default 30000
   int32  network_hop_ms    = 3;  // default 20 — latency added per cross-group call
+
+  // Price of data on a cut edge. Defaults to 0.
+  //
+  // AWS confirmed that data transfer for Lambda-to-Lambda invocation within one
+  // region is NOT billed: the payload travels through the Lambda service's own
+  // internal infrastructure inside the region. The model previously charged
+  // $0.01/GiB on every cut edge, which was the entire cost saving it reported.
+  //
+  // Kept as a knob because the charge is real when calls genuinely cross a
+  // region or leave AWS, where EC2 transfer rates apply.
+  double data_transfer_usd_per_gib = 4;
 }
 
 // The full application graph.

@@ -76,9 +76,18 @@ func (m *MinWCut) Optimize(app *domain.Application) AlgorithmResult {
 			continue
 		}
 
-		// Check memory constraint before merging.
-		// Python: if sum(f.memory for f in parent_group) + sum(...child_group) <= app.max_memory
-		if domain.GroupMemory(groups[parentIdx])+domain.GroupMemory(groups[childIdx]) <= app.MaxMemoryMB {
+		// Two gates. The memory one checks the fused function fits the limit; it
+		// takes the max of the two groups rather than their sum, because that is
+		// what Lambda would provision.
+		//
+		// The profitability gate is the one that matters. This algorithm merges
+		// by descending transfer cost and would otherwise happily fold a 128MB
+		// branch into a 1024MB one to save a rounding error of transfer, leaving
+		// the light branch billing at 8x for its whole duration. Pricing that
+		// into the cost model would not help: the cost model only ranks finished
+		// candidates, so a partition never proposed can never be chosen.
+		fits := max(domain.GroupMemory(groups[parentIdx]), domain.GroupMemory(groups[childIdx])) <= app.MaxMemoryMB
+		if fits && domain.MergeIsProfitable(groups[parentIdx], groups[childIdx]) {
 			// Merge child group into parent group, then remove child group slot.
 			// Python: groups[parent_idx].extend(child_group); groups.pop(child_idx)
 			groups[parentIdx] = append(groups[parentIdx], groups[childIdx]...)
