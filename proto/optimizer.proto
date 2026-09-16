@@ -39,6 +39,19 @@ message Metrics {
 }
 
 // Result from a single algorithm run.
+// Tradeoff explains a partition against running every function separately.
+//
+// Fusion has two cost effects pulling in opposite directions: it removes
+// platform invocations (saving request charges) and it raises every member to
+// its block's memory (adding execution charges). A net figure hides which one
+// dominated, which is exactly what a reader needs to judge the trade.
+message Tradeoff {
+  double invocations_removed = 1;  // platform invocations that become in-process calls
+  double request_delta_usd   = 2;  // negative when fusion saves request charges
+  double execution_delta_usd = 3;  // positive when members run at a higher memory
+  int32  hops_removed        = 4;  // cut edges eliminated from the critical path
+}
+
 message AlgorithmResult {
   string    name          = 1;  // human-readable algo name, e.g. "Greedy TP (GrTP)"
   Algorithm algorithm     = 2;
@@ -46,6 +59,12 @@ message AlgorithmResult {
   Metrics   metrics       = 4;
   bool      error         = 5;
   string    error_message = 6;
+
+  // True when another candidate is no worse on both cost and latency and
+  // strictly better on one, i.e. this option is never worth choosing.
+  bool     dominated     = 7;
+  string   dominated_by  = 8;
+  Tradeoff tradeoff      = 9;
 }
 
 // The full optimization plan returned by the optimizer service.
@@ -53,9 +72,18 @@ message AlgorithmResult {
 // can display a comparison table.
 message OptimizationPlan {
   repeated AlgorithmResult results = 1;
-  // The recommended result — lowest cost among feasible solutions.
-  // Empty if no feasible solution was found.
+
+  // The lowest-cost feasible result. Retained under its original name for
+  // compatibility, but it is no longer "the answer": fusion trades cost against
+  // latency, and which side of that trade suits a user depends on things this
+  // service cannot see. Prefer presenting the frontier.
   AlgorithmResult recommended = 2;
+
+  // The two ends of the tradeoff. When they are the same option there is no
+  // decision to make and unambiguous is true.
+  AlgorithmResult cheapest    = 3;
+  AlgorithmResult fastest     = 4;
+  bool            unambiguous = 5;
 }
 
 // ─────────────────────────────────────────────

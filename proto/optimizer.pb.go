@@ -226,21 +226,100 @@ func (x *Metrics) GetRuntimeMs() float64 {
 }
 
 // Result from a single algorithm run.
+// Tradeoff explains a partition against running every function separately.
+//
+// Fusion has two cost effects pulling in opposite directions: it removes
+// platform invocations (saving request charges) and it raises every member to
+// its block's memory (adding execution charges). A net figure hides which one
+// dominated, which is exactly what a reader needs to judge the trade.
+type Tradeoff struct {
+	state              protoimpl.MessageState `protogen:"open.v1"`
+	InvocationsRemoved float64                `protobuf:"fixed64,1,opt,name=invocations_removed,json=invocationsRemoved,proto3" json:"invocations_removed,omitempty"` // platform invocations that become in-process calls
+	RequestDeltaUsd    float64                `protobuf:"fixed64,2,opt,name=request_delta_usd,json=requestDeltaUsd,proto3" json:"request_delta_usd,omitempty"`        // negative when fusion saves request charges
+	ExecutionDeltaUsd  float64                `protobuf:"fixed64,3,opt,name=execution_delta_usd,json=executionDeltaUsd,proto3" json:"execution_delta_usd,omitempty"`  // positive when members run at a higher memory
+	HopsRemoved        int32                  `protobuf:"varint,4,opt,name=hops_removed,json=hopsRemoved,proto3" json:"hops_removed,omitempty"`                       // cut edges eliminated from the critical path
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
+}
+
+func (x *Tradeoff) Reset() {
+	*x = Tradeoff{}
+	mi := &file_proto_optimizer_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Tradeoff) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Tradeoff) ProtoMessage() {}
+
+func (x *Tradeoff) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_optimizer_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Tradeoff.ProtoReflect.Descriptor instead.
+func (*Tradeoff) Descriptor() ([]byte, []int) {
+	return file_proto_optimizer_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *Tradeoff) GetInvocationsRemoved() float64 {
+	if x != nil {
+		return x.InvocationsRemoved
+	}
+	return 0
+}
+
+func (x *Tradeoff) GetRequestDeltaUsd() float64 {
+	if x != nil {
+		return x.RequestDeltaUsd
+	}
+	return 0
+}
+
+func (x *Tradeoff) GetExecutionDeltaUsd() float64 {
+	if x != nil {
+		return x.ExecutionDeltaUsd
+	}
+	return 0
+}
+
+func (x *Tradeoff) GetHopsRemoved() int32 {
+	if x != nil {
+		return x.HopsRemoved
+	}
+	return 0
+}
+
 type AlgorithmResult struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"` // human-readable algo name, e.g. "Greedy TP (GrTP)"
-	Algorithm     Algorithm              `protobuf:"varint,2,opt,name=algorithm,proto3,enum=optifuse.optimizer.v1.Algorithm" json:"algorithm,omitempty"`
-	Groups        []*FusionGroup         `protobuf:"bytes,3,rep,name=groups,proto3" json:"groups,omitempty"`
-	Metrics       *Metrics               `protobuf:"bytes,4,opt,name=metrics,proto3" json:"metrics,omitempty"`
-	Error         bool                   `protobuf:"varint,5,opt,name=error,proto3" json:"error,omitempty"`
-	ErrorMessage  string                 `protobuf:"bytes,6,opt,name=error_message,json=errorMessage,proto3" json:"error_message,omitempty"`
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	Name         string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"` // human-readable algo name, e.g. "Greedy TP (GrTP)"
+	Algorithm    Algorithm              `protobuf:"varint,2,opt,name=algorithm,proto3,enum=optifuse.optimizer.v1.Algorithm" json:"algorithm,omitempty"`
+	Groups       []*FusionGroup         `protobuf:"bytes,3,rep,name=groups,proto3" json:"groups,omitempty"`
+	Metrics      *Metrics               `protobuf:"bytes,4,opt,name=metrics,proto3" json:"metrics,omitempty"`
+	Error        bool                   `protobuf:"varint,5,opt,name=error,proto3" json:"error,omitempty"`
+	ErrorMessage string                 `protobuf:"bytes,6,opt,name=error_message,json=errorMessage,proto3" json:"error_message,omitempty"`
+	// True when another candidate is no worse on both cost and latency and
+	// strictly better on one, i.e. this option is never worth choosing.
+	Dominated     bool      `protobuf:"varint,7,opt,name=dominated,proto3" json:"dominated,omitempty"`
+	DominatedBy   string    `protobuf:"bytes,8,opt,name=dominated_by,json=dominatedBy,proto3" json:"dominated_by,omitempty"`
+	Tradeoff      *Tradeoff `protobuf:"bytes,9,opt,name=tradeoff,proto3" json:"tradeoff,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *AlgorithmResult) Reset() {
 	*x = AlgorithmResult{}
-	mi := &file_proto_optimizer_proto_msgTypes[2]
+	mi := &file_proto_optimizer_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -252,7 +331,7 @@ func (x *AlgorithmResult) String() string {
 func (*AlgorithmResult) ProtoMessage() {}
 
 func (x *AlgorithmResult) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_optimizer_proto_msgTypes[2]
+	mi := &file_proto_optimizer_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -265,7 +344,7 @@ func (x *AlgorithmResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AlgorithmResult.ProtoReflect.Descriptor instead.
 func (*AlgorithmResult) Descriptor() ([]byte, []int) {
-	return file_proto_optimizer_proto_rawDescGZIP(), []int{2}
+	return file_proto_optimizer_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *AlgorithmResult) GetName() string {
@@ -310,22 +389,50 @@ func (x *AlgorithmResult) GetErrorMessage() string {
 	return ""
 }
 
+func (x *AlgorithmResult) GetDominated() bool {
+	if x != nil {
+		return x.Dominated
+	}
+	return false
+}
+
+func (x *AlgorithmResult) GetDominatedBy() string {
+	if x != nil {
+		return x.DominatedBy
+	}
+	return ""
+}
+
+func (x *AlgorithmResult) GetTradeoff() *Tradeoff {
+	if x != nil {
+		return x.Tradeoff
+	}
+	return nil
+}
+
 // The full optimization plan returned by the optimizer service.
 // Contains results from all requested algorithms so the frontend
 // can display a comparison table.
 type OptimizationPlan struct {
 	state   protoimpl.MessageState `protogen:"open.v1"`
 	Results []*AlgorithmResult     `protobuf:"bytes,1,rep,name=results,proto3" json:"results,omitempty"`
-	// The recommended result — lowest cost among feasible solutions.
-	// Empty if no feasible solution was found.
-	Recommended   *AlgorithmResult `protobuf:"bytes,2,opt,name=recommended,proto3" json:"recommended,omitempty"`
+	// The lowest-cost feasible result. Retained under its original name for
+	// compatibility, but it is no longer "the answer": fusion trades cost against
+	// latency, and which side of that trade suits a user depends on things this
+	// service cannot see. Prefer presenting the frontier.
+	Recommended *AlgorithmResult `protobuf:"bytes,2,opt,name=recommended,proto3" json:"recommended,omitempty"`
+	// The two ends of the tradeoff. When they are the same option there is no
+	// decision to make and unambiguous is true.
+	Cheapest      *AlgorithmResult `protobuf:"bytes,3,opt,name=cheapest,proto3" json:"cheapest,omitempty"`
+	Fastest       *AlgorithmResult `protobuf:"bytes,4,opt,name=fastest,proto3" json:"fastest,omitempty"`
+	Unambiguous   bool             `protobuf:"varint,5,opt,name=unambiguous,proto3" json:"unambiguous,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *OptimizationPlan) Reset() {
 	*x = OptimizationPlan{}
-	mi := &file_proto_optimizer_proto_msgTypes[3]
+	mi := &file_proto_optimizer_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -337,7 +444,7 @@ func (x *OptimizationPlan) String() string {
 func (*OptimizationPlan) ProtoMessage() {}
 
 func (x *OptimizationPlan) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_optimizer_proto_msgTypes[3]
+	mi := &file_proto_optimizer_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -350,7 +457,7 @@ func (x *OptimizationPlan) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OptimizationPlan.ProtoReflect.Descriptor instead.
 func (*OptimizationPlan) Descriptor() ([]byte, []int) {
-	return file_proto_optimizer_proto_rawDescGZIP(), []int{3}
+	return file_proto_optimizer_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *OptimizationPlan) GetResults() []*AlgorithmResult {
@@ -367,6 +474,27 @@ func (x *OptimizationPlan) GetRecommended() *AlgorithmResult {
 	return nil
 }
 
+func (x *OptimizationPlan) GetCheapest() *AlgorithmResult {
+	if x != nil {
+		return x.Cheapest
+	}
+	return nil
+}
+
+func (x *OptimizationPlan) GetFastest() *AlgorithmResult {
+	if x != nil {
+		return x.Fastest
+	}
+	return nil
+}
+
+func (x *OptimizationPlan) GetUnambiguous() bool {
+	if x != nil {
+		return x.Unambiguous
+	}
+	return false
+}
+
 type OptimizeRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Graph         *Graph                 `protobuf:"bytes,1,opt,name=graph,proto3" json:"graph,omitempty"`
@@ -377,7 +505,7 @@ type OptimizeRequest struct {
 
 func (x *OptimizeRequest) Reset() {
 	*x = OptimizeRequest{}
-	mi := &file_proto_optimizer_proto_msgTypes[4]
+	mi := &file_proto_optimizer_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -389,7 +517,7 @@ func (x *OptimizeRequest) String() string {
 func (*OptimizeRequest) ProtoMessage() {}
 
 func (x *OptimizeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_optimizer_proto_msgTypes[4]
+	mi := &file_proto_optimizer_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -402,7 +530,7 @@ func (x *OptimizeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OptimizeRequest.ProtoReflect.Descriptor instead.
 func (*OptimizeRequest) Descriptor() ([]byte, []int) {
-	return file_proto_optimizer_proto_rawDescGZIP(), []int{4}
+	return file_proto_optimizer_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *OptimizeRequest) GetGraph() *Graph {
@@ -428,7 +556,7 @@ type OptimizeResponse struct {
 
 func (x *OptimizeResponse) Reset() {
 	*x = OptimizeResponse{}
-	mi := &file_proto_optimizer_proto_msgTypes[5]
+	mi := &file_proto_optimizer_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -440,7 +568,7 @@ func (x *OptimizeResponse) String() string {
 func (*OptimizeResponse) ProtoMessage() {}
 
 func (x *OptimizeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_optimizer_proto_msgTypes[5]
+	mi := &file_proto_optimizer_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -453,7 +581,7 @@ func (x *OptimizeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OptimizeResponse.ProtoReflect.Descriptor instead.
 func (*OptimizeResponse) Descriptor() ([]byte, []int) {
-	return file_proto_optimizer_proto_rawDescGZIP(), []int{5}
+	return file_proto_optimizer_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *OptimizeResponse) GetPlan() *OptimizationPlan {
@@ -479,17 +607,28 @@ const file_proto_optimizer_proto_rawDesc = "" +
 	"latency_ms\x18\x02 \x01(\x01R\tlatencyMs\x12\x1a\n" +
 	"\bfeasible\x18\x03 \x01(\bR\bfeasible\x12\x1d\n" +
 	"\n" +
-	"runtime_ms\x18\x04 \x01(\x01R\truntimeMs\"\x96\x02\n" +
+	"runtime_ms\x18\x04 \x01(\x01R\truntimeMs\"\xba\x01\n" +
+	"\bTradeoff\x12/\n" +
+	"\x13invocations_removed\x18\x01 \x01(\x01R\x12invocationsRemoved\x12*\n" +
+	"\x11request_delta_usd\x18\x02 \x01(\x01R\x0frequestDeltaUsd\x12.\n" +
+	"\x13execution_delta_usd\x18\x03 \x01(\x01R\x11executionDeltaUsd\x12!\n" +
+	"\fhops_removed\x18\x04 \x01(\x05R\vhopsRemoved\"\x94\x03\n" +
 	"\x0fAlgorithmResult\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12>\n" +
 	"\talgorithm\x18\x02 \x01(\x0e2 .optifuse.optimizer.v1.AlgorithmR\talgorithm\x12:\n" +
 	"\x06groups\x18\x03 \x03(\v2\".optifuse.optimizer.v1.FusionGroupR\x06groups\x128\n" +
 	"\ametrics\x18\x04 \x01(\v2\x1e.optifuse.optimizer.v1.MetricsR\ametrics\x12\x14\n" +
 	"\x05error\x18\x05 \x01(\bR\x05error\x12#\n" +
-	"\rerror_message\x18\x06 \x01(\tR\ferrorMessage\"\x9e\x01\n" +
+	"\rerror_message\x18\x06 \x01(\tR\ferrorMessage\x12\x1c\n" +
+	"\tdominated\x18\a \x01(\bR\tdominated\x12!\n" +
+	"\fdominated_by\x18\b \x01(\tR\vdominatedBy\x12;\n" +
+	"\btradeoff\x18\t \x01(\v2\x1f.optifuse.optimizer.v1.TradeoffR\btradeoff\"\xc6\x02\n" +
 	"\x10OptimizationPlan\x12@\n" +
 	"\aresults\x18\x01 \x03(\v2&.optifuse.optimizer.v1.AlgorithmResultR\aresults\x12H\n" +
-	"\vrecommended\x18\x02 \x01(\v2&.optifuse.optimizer.v1.AlgorithmResultR\vrecommended\"\x83\x01\n" +
+	"\vrecommended\x18\x02 \x01(\v2&.optifuse.optimizer.v1.AlgorithmResultR\vrecommended\x12B\n" +
+	"\bcheapest\x18\x03 \x01(\v2&.optifuse.optimizer.v1.AlgorithmResultR\bcheapest\x12@\n" +
+	"\afastest\x18\x04 \x01(\v2&.optifuse.optimizer.v1.AlgorithmResultR\afastest\x12 \n" +
+	"\vunambiguous\x18\x05 \x01(\bR\vunambiguous\"\x83\x01\n" +
 	"\x0fOptimizeRequest\x12.\n" +
 	"\x05graph\x18\x01 \x01(\v2\x18.optifuse.graph.v1.GraphR\x05graph\x12@\n" +
 	"\n" +
@@ -522,33 +661,37 @@ func file_proto_optimizer_proto_rawDescGZIP() []byte {
 }
 
 var file_proto_optimizer_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_proto_optimizer_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
+var file_proto_optimizer_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
 var file_proto_optimizer_proto_goTypes = []any{
 	(Algorithm)(0),           // 0: optifuse.optimizer.v1.Algorithm
 	(*FusionGroup)(nil),      // 1: optifuse.optimizer.v1.FusionGroup
 	(*Metrics)(nil),          // 2: optifuse.optimizer.v1.Metrics
-	(*AlgorithmResult)(nil),  // 3: optifuse.optimizer.v1.AlgorithmResult
-	(*OptimizationPlan)(nil), // 4: optifuse.optimizer.v1.OptimizationPlan
-	(*OptimizeRequest)(nil),  // 5: optifuse.optimizer.v1.OptimizeRequest
-	(*OptimizeResponse)(nil), // 6: optifuse.optimizer.v1.OptimizeResponse
-	(*Graph)(nil),            // 7: optifuse.graph.v1.Graph
+	(*Tradeoff)(nil),         // 3: optifuse.optimizer.v1.Tradeoff
+	(*AlgorithmResult)(nil),  // 4: optifuse.optimizer.v1.AlgorithmResult
+	(*OptimizationPlan)(nil), // 5: optifuse.optimizer.v1.OptimizationPlan
+	(*OptimizeRequest)(nil),  // 6: optifuse.optimizer.v1.OptimizeRequest
+	(*OptimizeResponse)(nil), // 7: optifuse.optimizer.v1.OptimizeResponse
+	(*Graph)(nil),            // 8: optifuse.graph.v1.Graph
 }
 var file_proto_optimizer_proto_depIdxs = []int32{
-	0, // 0: optifuse.optimizer.v1.AlgorithmResult.algorithm:type_name -> optifuse.optimizer.v1.Algorithm
-	1, // 1: optifuse.optimizer.v1.AlgorithmResult.groups:type_name -> optifuse.optimizer.v1.FusionGroup
-	2, // 2: optifuse.optimizer.v1.AlgorithmResult.metrics:type_name -> optifuse.optimizer.v1.Metrics
-	3, // 3: optifuse.optimizer.v1.OptimizationPlan.results:type_name -> optifuse.optimizer.v1.AlgorithmResult
-	3, // 4: optifuse.optimizer.v1.OptimizationPlan.recommended:type_name -> optifuse.optimizer.v1.AlgorithmResult
-	7, // 5: optifuse.optimizer.v1.OptimizeRequest.graph:type_name -> optifuse.graph.v1.Graph
-	0, // 6: optifuse.optimizer.v1.OptimizeRequest.algorithms:type_name -> optifuse.optimizer.v1.Algorithm
-	4, // 7: optifuse.optimizer.v1.OptimizeResponse.plan:type_name -> optifuse.optimizer.v1.OptimizationPlan
-	5, // 8: optifuse.optimizer.v1.OptimizerService.Optimize:input_type -> optifuse.optimizer.v1.OptimizeRequest
-	6, // 9: optifuse.optimizer.v1.OptimizerService.Optimize:output_type -> optifuse.optimizer.v1.OptimizeResponse
-	9, // [9:10] is the sub-list for method output_type
-	8, // [8:9] is the sub-list for method input_type
-	8, // [8:8] is the sub-list for extension type_name
-	8, // [8:8] is the sub-list for extension extendee
-	0, // [0:8] is the sub-list for field type_name
+	0,  // 0: optifuse.optimizer.v1.AlgorithmResult.algorithm:type_name -> optifuse.optimizer.v1.Algorithm
+	1,  // 1: optifuse.optimizer.v1.AlgorithmResult.groups:type_name -> optifuse.optimizer.v1.FusionGroup
+	2,  // 2: optifuse.optimizer.v1.AlgorithmResult.metrics:type_name -> optifuse.optimizer.v1.Metrics
+	3,  // 3: optifuse.optimizer.v1.AlgorithmResult.tradeoff:type_name -> optifuse.optimizer.v1.Tradeoff
+	4,  // 4: optifuse.optimizer.v1.OptimizationPlan.results:type_name -> optifuse.optimizer.v1.AlgorithmResult
+	4,  // 5: optifuse.optimizer.v1.OptimizationPlan.recommended:type_name -> optifuse.optimizer.v1.AlgorithmResult
+	4,  // 6: optifuse.optimizer.v1.OptimizationPlan.cheapest:type_name -> optifuse.optimizer.v1.AlgorithmResult
+	4,  // 7: optifuse.optimizer.v1.OptimizationPlan.fastest:type_name -> optifuse.optimizer.v1.AlgorithmResult
+	8,  // 8: optifuse.optimizer.v1.OptimizeRequest.graph:type_name -> optifuse.graph.v1.Graph
+	0,  // 9: optifuse.optimizer.v1.OptimizeRequest.algorithms:type_name -> optifuse.optimizer.v1.Algorithm
+	5,  // 10: optifuse.optimizer.v1.OptimizeResponse.plan:type_name -> optifuse.optimizer.v1.OptimizationPlan
+	6,  // 11: optifuse.optimizer.v1.OptimizerService.Optimize:input_type -> optifuse.optimizer.v1.OptimizeRequest
+	7,  // 12: optifuse.optimizer.v1.OptimizerService.Optimize:output_type -> optifuse.optimizer.v1.OptimizeResponse
+	12, // [12:13] is the sub-list for method output_type
+	11, // [11:12] is the sub-list for method input_type
+	11, // [11:11] is the sub-list for extension type_name
+	11, // [11:11] is the sub-list for extension extendee
+	0,  // [0:11] is the sub-list for field type_name
 }
 
 func init() { file_proto_optimizer_proto_init() }
@@ -563,7 +706,7 @@ func file_proto_optimizer_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_optimizer_proto_rawDesc), len(file_proto_optimizer_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   6,
+			NumMessages:   7,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

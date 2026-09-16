@@ -65,16 +65,21 @@ func (s *server) Optimize(ctx context.Context, req *pb.OptimizeRequest) (*pb.Opt
 		&algo.MtxILP{},
 	}
 
-	var results []*pb.AlgorithmResult
-	var bestResult *pb.AlgorithmResult
-	// Captured to express the recommendation as a saving against doing nothing,
-	// which is the number the user actually sees.
+	// Every algorithm runs first, then the frontier is computed across all of
+	// them. Dominance is a property of the set, not of any single result, so it
+	// cannot be decided while they are still being produced.
+	domainResults := make([]algo.AlgorithmResult, 0, len(optimizers))
 	noFusionCost := 0.0
 
 	for _, o := range optimizers {
 		algoStart := time.Now()
 		r := o.Optimize(app)
 		elapsed := time.Since(algoStart)
+		r.WallClockMs = float64(elapsed.Microseconds()) / 1000.0
+		if r.Error == "" {
+			r.Tradeoff = app.CalculateTradeoff(r.Groups)
+		}
+		domainResults = append(domainResults, r)
 
 		algorithmDuration.WithLabelValues(algorithmSlug(r.Name)).Observe(elapsed.Seconds())
 		if r.Error != "" {
@@ -90,26 +95,40 @@ func (s *server) Optimize(ctx context.Context, req *pb.OptimizeRequest) (*pb.Opt
 			"cost_usd", r.Metrics.TotalCostUSD,
 			"latency_ms", r.Metrics.LatencyMS,
 			"groups", len(r.Groups),
+			"invocations_removed", r.Tradeoff.InvocationsRemoved,
+			"execution_delta_usd", r.Tradeoff.ExecutionDeltaUSD,
+			"hops_removed", r.Tradeoff.HopsRemoved,
 			"wall_clock_ms", elapsed.Milliseconds(),
 			"error", r.Error,
 		)
+	}
+
+	domainResults = algo.MarkFrontier(domainResults)
+	cheapest, fastest, unambiguous := algo.Extremes(domainResults)
+
+	var results []*pb.AlgorithmResult
+	var bestResult, cheapestPB, fastestPB *pb.AlgorithmResult
+
+	for i := range domainResults {
+		r := domainResults[i]
 
 		var fusionGroups []*pb.FusionGroup
 		for _, g := range r.Groups {
 			ids := make([]string, len(g))
-			totalMem := 0
-			totalRuntime := 0
 			for i, f := range g {
 				ids[i] = f.ID
-				totalMem += f.MemoryMB
-				totalRuntime += f.RuntimeMs()
 			}
-			gbSec := (float64(totalMem) / 1024.0) * (float64(totalRuntime) / 1000.0)
+			// Report exactly what the cost model priced. The composite's memory
+			// is the largest member (one Lambda, one allocation) and its cost is
+			// that allocation held for the members' summed runtime. Re-deriving
+			// these here is how the UI ended up showing 3072 MB for six 512 MB
+			// functions while the caption said "largest member".
+			comp := &domain.CompositeFunction{Members: g}
 			fusionGroups = append(fusionGroups, &pb.FusionGroup{
 				FunctionIds:      ids,
-				TotalMemoryMb:    int32(totalMem),
-				TotalRuntimeMs:   int32(totalRuntime),
-				ExecutionCostUsd: 0.00001667 * gbSec,
+				TotalMemoryMb:    int32(comp.MemoryMB()),
+				TotalRuntimeMs:   int32(comp.RuntimeMs()),
+				ExecutionCostUsd: comp.ExecutionCostUSD(),
 			})
 		}
 
@@ -124,13 +143,23 @@ func (s *server) Optimize(ctx context.Context, req *pb.OptimizeRequest) (*pb.Opt
 			},
 			Error:        r.Error != "",
 			ErrorMessage: r.Error,
+			Dominated:    r.Dominated,
+			DominatedBy:  r.DominatedBy,
+			Tradeoff: &pb.Tradeoff{
+				InvocationsRemoved: r.Tradeoff.InvocationsRemoved,
+				RequestDeltaUsd:    r.Tradeoff.RequestDeltaUSD,
+				ExecutionDeltaUsd:  r.Tradeoff.ExecutionDeltaUSD,
+				HopsRemoved:        int32(r.Tradeoff.HopsRemoved),
+			},
 		}
 		results = append(results, pbResult)
 
-		if r.Metrics.Feasible && r.Error == "" {
-			if bestResult == nil || r.Metrics.TotalCostUSD < bestResult.Metrics.TotalCostUsd {
-				bestResult = pbResult
-			}
+		if cheapest != nil && r.Name == cheapest.Name {
+			cheapestPB = pbResult
+			bestResult = pbResult
+		}
+		if fastest != nil && r.Name == fastest.Name {
+			fastestPB = pbResult
 		}
 	}
 
@@ -148,20 +177,34 @@ func (s *server) Optimize(ctx context.Context, req *pb.OptimizeRequest) (*pb.Opt
 		optimizationsTotal.WithLabelValues("infeasible").Inc()
 	}
 
+	name := func(r *algo.AlgorithmResult) string {
+		if r == nil {
+			return "none"
+		}
+		return r.Name
+	}
+	onFrontier := 0
+	for _, r := range domainResults {
+		if r.Error == "" && r.Metrics.Feasible && !r.Dominated {
+			onFrontier++
+		}
+	}
+
 	log.Info("optimization complete",
 		"total_algorithms", len(results),
-		"best", func() string {
-			if bestResult != nil {
-				return bestResult.Name
-			}
-			return "none"
-		}(),
+		"on_frontier", onFrontier,
+		"cheapest", name(cheapest),
+		"fastest", name(fastest),
+		"unambiguous", unambiguous,
 	)
 
 	return &pb.OptimizeResponse{
 		Plan: &pb.OptimizationPlan{
 			Results:     results,
 			Recommended: bestResult,
+			Cheapest:    cheapestPB,
+			Fastest:     fastestPB,
+			Unambiguous: unambiguous,
 		},
 	}, nil
 }
@@ -209,6 +252,7 @@ func graphToApp(g *pb.Graph) (*domain.Application, error) {
 
 			AvgInitDurationMs: node.AvgInitDurationMs,
 			P99InitDurationMs: node.P99InitDurationMs,
+			InvocationRate:    1.0, // refined below once the entry point is known
 		}
 		fm[id] = lf
 	}
@@ -246,6 +290,29 @@ func graphToApp(g *pb.Graph) (*domain.Application, error) {
 		c = &pb.Constraints{MaxMemoryMb: 1024, MaxLatencyMs: 30000, NetworkHopMs: 20}
 	}
 
+	// The transfer rate lives on every node because DataTransferCostUSD is a
+	// method on LambdaFunction and MergeProfitUSD works on bare slices with no
+	// Application in scope.
+	for _, f := range fm {
+		f.DataTransferUSDPerGiB = c.DataTransferUsdPerGib
+	}
+
+	// Derive each function's invocation rate relative to the entry point, which
+	// runs exactly once per application invocation. A function invoked twice as
+	// often as the entry has a rate of 2.
+	//
+	// This is the paper's r_f, and it decides the request charge, which is now
+	// the only way fusion saves money. Without telemetry every rate stays at 1,
+	// which under-counts fan-out but never invents savings.
+	if entry := entryFunction(funcs); entry != nil && entry.InvocationCount > 0 {
+		base := float64(entry.InvocationCount)
+		for _, f := range funcs {
+			if f.InvocationCount > 0 {
+				f.InvocationRate = float64(f.InvocationCount) / base
+			}
+		}
+	}
+
 	return &domain.Application{
 		Name:            g.Name,
 		Functions:       funcs,
@@ -254,4 +321,15 @@ func graphToApp(g *pb.Graph) (*domain.Application, error) {
 		MaxLatencyMS:    int(c.MaxLatencyMs),
 		NetworkHopMS:    int(c.NetworkHopMs),
 	}, nil
+}
+
+// entryFunction returns the function the platform invokes to start the
+// application, i.e. the one with no parent inside the graph.
+func entryFunction(funcs []*domain.LambdaFunction) *domain.LambdaFunction {
+	for _, f := range funcs {
+		if f.Parent == nil {
+			return f
+		}
+	}
+	return nil
 }

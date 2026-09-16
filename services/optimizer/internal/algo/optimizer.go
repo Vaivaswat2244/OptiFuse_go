@@ -70,4 +70,13 @@ type AlgorithmResult struct {
 	WallClockMs float64
 	// Error is non-empty if the algorithm failed or found no feasible solution.
 	Error string
+
+	// Dominated is true when another candidate is no worse on both cost and
+	// latency and strictly better on one, i.e. this option is never worth
+	// choosing. Set by MarkFrontier, not by the algorithms themselves.
+	Dominated   bool
+	DominatedBy string
+
+	// Tradeoff explains this partition against running everything separately.
+	Tradeoff domain.Tradeoff
 }
