@@ -1,0 +1,6 @@
+# State holds resource IDs and the cluster-admin kubeconfig. Never in Git.
+*.tfstate
+*.tfstate.*
+.terraform/
+crash.log
+tfplan
