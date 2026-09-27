@@ -1,0 +1,30 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: gateway
+  annotations:
+    # cert-manager sees this, creates a Certificate for the hosts under tls,
+    # and solves Let's Encrypt's HTTP-01 challenge through this same ingress.
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    # nginx gives up on a backend after 60s by default. A live simulation has a
+    # 120s budget in simulate.go (CloudWatch polling dominates), so without
+    # this the ingress returns 504 on slow runs that the gateway would have
+    # completed.
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "130"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "130"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [api.optifuse.vaivaswat.me]
+      secretName: api-optifuse-tls
+  rules:
+    - host: api.optifuse.vaivaswat.me
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: gateway
+                port:
+                  name: http

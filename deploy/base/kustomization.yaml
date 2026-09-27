@@ -1,0 +1,21 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Every namespaced object below lands in "optifuse". Cluster-scoped objects
+# (the ClusterIssuer) live in ../cluster instead, because Kustomize stamps this
+# namespace onto any kind it does not recognise, CRDs included.
+namespace: optifuse
+
+resources:
+  - namespace.yaml
+  - config.yaml
+  - postgres.yaml
+  - parser.yaml
+  - enricher.yaml
+  - optimizer.yaml
+  - gateway.yaml
+  - ingress.yaml
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: optifuse

@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: optifuse
+  labels:
+    # Pod Security Admission. "restricted" rejects any pod that runs as root,
+    # keeps capabilities, or allows privilege escalation. Every workload here is
+    # written to pass it, so this is enforcement rather than aspiration.
+    pod-security.kubernetes.io/enforce: restricted

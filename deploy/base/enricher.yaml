@@ -1,0 +1,77 @@
+# Enricher: reads CloudWatch through the customer's cross-account role.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: enricher
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: enricher
+  template:
+    metadata:
+      labels:
+        app: enricher
+    spec:
+      # Matches the code: 2s drain after SIGTERM, then up to 25s of
+      # GracefulStop. Kubernetes sends SIGKILL when this runs out.
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001 # the "optifuse" user created in the Dockerfile
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: enricher
+          image: ghcr.io/vaivaswat2244/optifuse-enricher
+          ports:
+            - name: grpc
+              containerPort: 50052
+            - name: metrics
+              containerPort: 9090
+          envFrom:
+            - configMapRef:
+                name: optifuse-config
+            - secretRef:
+                # AWS keys for the OptiFuse account, which then assumes each
+                # customer role. Milestone 4 replaces this Secret with
+                # workload identity, and the SDK picks that up unchanged.
+                name: enricher-aws
+          env:
+            - name: PORT
+              value: "50052"
+          # Native gRPC probes call grpc.health.v1.Health/Check with service "",
+          # which is the status grpcserver sets. Readiness decides whether the
+          # Service sends this pod traffic; liveness decides whether to restart
+          # it. After SIGTERM the server reports NOT_SERVING, readiness fails,
+          # and the pod leaves the endpoints while it drains.
+          readinessProbe:
+            grpc:
+              port: 50052
+            periodSeconds: 5
+          livenessProbe:
+            grpc:
+              port: 50052
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            requests: { cpu: 20m, memory: 48Mi }
+            limits: { memory: 192Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: enricher
+spec:
+  selector:
+    app: enricher
+  ports:
+    - name: grpc
+      port: 50052
+    - name: metrics
+      port: 9090

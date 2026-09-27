@@ -1,0 +1,105 @@
+# A StatefulSet rather than a Deployment because the pod owns a disk. The
+# volumeClaimTemplate gives it a PersistentVolumeClaim with a stable name, so a
+# rescheduled pod reattaches the same Azure disk instead of starting empty.
+#
+# In-cluster Postgres is a dev-environment choice: one replica, no backups, no
+# failover. The data here (users, tokens, a role ARN) is re-creatable by logging
+# in again. Anything that matters belongs on a managed database.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 70 # the "postgres" user in the alpine image
+        runAsGroup: 70
+        # The Azure disk mounts owned by root. fsGroup makes the kubelet chown
+        # it to this group on attach, or Postgres cannot write its data dir.
+        fsGroup: 70
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: postgres
+          image: postgres:15-alpine
+          ports:
+            - name: postgres
+              containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              value: optifuse
+            - name: POSTGRES_DB
+              value: optifuse_db
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres
+                  key: password
+            # A fresh Azure disk has a lost+found directory at its root, and
+            # initdb refuses to initialise a non-empty directory. A subdirectory
+            # sidesteps it.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "optifuse", "-d", "optifuse_db"]
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "optifuse", "-d", "optifuse_db"]
+            periodSeconds: 20
+            failureThreshold: 6
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            # Postgres writes its socket and lock file here. With a read-only
+            # root filesystem it needs somewhere writable.
+            - name: run
+              mountPath: /var/run/postgresql
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: run
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 4Gi # smallest Azure Standard SSD tier; smaller requests bill as this anyway
+---
+# Headless Service (clusterIP: None): DNS returns the pod's own IP rather than
+# a load-balanced virtual IP. The convention for StatefulSets, and it keeps the
+# name "postgres" stable for the gateway's DATABASE_URL.
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+spec:
+  clusterIP: None
+  selector:
+    app: postgres
+  ports:
+    - name: postgres
+      port: 5432

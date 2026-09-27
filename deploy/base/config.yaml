@@ -1,0 +1,16 @@
+# Non-secret configuration shared by all four services. A ConfigMap is plain
+# text in etcd and in Git; anything that must not be readable goes in a Secret.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: optifuse-config
+data:
+  LOG_LEVEL: info
+  LOG_FORMAT: json
+  # Service DNS names. Inside the cluster "parser" resolves to the parser
+  # Service's virtual IP through CoreDNS, exactly as it did on the compose
+  # network, which is why the gateway needs no code change.
+  PARSER_ADDR: parser:50051
+  ENRICHER_ADDR: enricher:50052
+  OPTIMIZER_ADDR: optimizer:50053
+  AWS_REGION: ap-south-1

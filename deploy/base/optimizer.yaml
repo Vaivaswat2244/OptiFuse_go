@@ -1,0 +1,80 @@
+# Optimizer: runs the six algorithms, shells out to glpsol for MtxILP.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: optimizer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: optimizer
+  template:
+    metadata:
+      labels:
+        app: optimizer
+    spec:
+      # Matches the code: 2s drain after SIGTERM, then up to 25s of
+      # GracefulStop. Kubernetes sends SIGKILL when this runs out.
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001 # the "optifuse" user created in the Dockerfile
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: optimizer
+          image: ghcr.io/vaivaswat2244/optifuse-optimizer
+          ports:
+            - name: grpc
+              containerPort: 50053
+            - name: metrics
+              containerPort: 9090
+          envFrom:
+            - configMapRef:
+                name: optifuse-config
+          env:
+            - name: PORT
+              value: "50053"
+          # Native gRPC probes call grpc.health.v1.Health/Check with service "",
+          # which is the status grpcserver sets. Readiness decides whether the
+          # Service sends this pod traffic; liveness decides whether to restart
+          # it. After SIGTERM the server reports NOT_SERVING, readiness fails,
+          # and the pod leaves the endpoints while it drains.
+          readinessProbe:
+            grpc:
+              port: 50053
+            periodSeconds: 5
+          livenessProbe:
+            grpc:
+              port: 50053
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { memory: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            # MtxILP writes LP and solution files to os.TempDir() for glpsol.
+            # The root filesystem is read-only, so /tmp has to be a volume.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: optimizer
+spec:
+  selector:
+    app: optimizer
+  ports:
+    - name: grpc
+      port: 50053
+    - name: metrics
+      port: 9090

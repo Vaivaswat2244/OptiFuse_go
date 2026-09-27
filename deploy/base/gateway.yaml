@@ -1,0 +1,73 @@
+# Gateway: the only service reachable from outside, through the Ingress.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gateway
+  template:
+    metadata:
+      labels:
+        app: gateway
+    spec:
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: gateway
+          image: ghcr.io/vaivaswat2244/optifuse-gateway
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: metrics
+              containerPort: 9090
+          envFrom:
+            - configMapRef:
+                name: optifuse-config
+            # DATABASE_URL, GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET,
+            # CLIENT_ORIGIN_URL. Created by hand; never committed.
+            - secretRef:
+                name: gateway
+          # Two different questions. Liveness: is the process wedged? It must
+          # not touch the database, because a failing liveness probe restarts
+          # the pod, and one database blip would restart every gateway at
+          # once. Readiness: can it serve right now? That one does ping the
+          # database, so a gateway that has lost it stops getting traffic
+          # without being killed.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 30m, memory: 64Mi }
+            limits: { memory: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway
+spec:
+  selector:
+    app: gateway
+  ports:
+    - name: http
+      port: 8080
+    - name: metrics
+      port: 9090

@@ -3,12 +3,31 @@ package db
 import (
 	"context"
 	"crypto/rand"
+	_ "embed"
 	"encoding/hex"
 	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// schema is applied on every connect. Every statement in it is IF NOT EXISTS,
+// so running it against an existing database is a no-op.
+//
+// It used to run only through Postgres's /docker-entrypoint-initdb.d, which
+// fires once, when the data directory is empty, and only for the official
+// image run by compose. Embedding it makes the gateway own its schema, so the
+// same binary works against compose, an in-cluster StatefulSet or a managed
+// database, from one copy of the file.
+//
+//go:embed schema.sql
+var schema string
+
+// schemaLockKey serialises schema application across replicas. Two gateways
+// starting at once would otherwise race on CREATE EXTENSION, which is not
+// safe to run concurrently even with IF NOT EXISTS. The value is arbitrary but
+// must be the same for every replica.
+const schemaLockKey = 8_224_117
 
 // Pool wraps pgxpool and provides all database operations
 // the gateway needs. No ORM — just plain SQL.
@@ -23,6 +42,16 @@ func New(ctx context.Context, connString string) (*Pool, error) {
 	}
 	if err := pool.Ping(ctx); err != nil {
 		return nil, fmt.Errorf("failed to ping database: %w", err)
+	}
+
+	// With no arguments pgx uses the simple query protocol, which accepts many
+	// statements in one call and runs them in a single implicit transaction.
+	// The transaction-scoped advisory lock is therefore held until the whole
+	// schema has applied, and released automatically if anything fails.
+	lock := fmt.Sprintf("SELECT pg_advisory_xact_lock(%d);\n", schemaLockKey)
+	if _, err := pool.Exec(ctx, lock+schema); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("failed to apply schema: %w", err)
 	}
 	return &Pool{pool: pool}, nil
 }

@@ -28,8 +28,8 @@ services:
       #
       # `docker compose down` keeps named volumes; only `down -v` removes them.
       - optifuse-db-data:/var/lib/postgresql/data
-      # Runs only when the data directory is empty, i.e. on first creation.
-      - ./services/gateway/internal/db/schema.sql:/docker-entrypoint-initdb.d/schema.sql
+      # No schema mount: the gateway embeds schema.sql and applies it on
+      # connect, so compose and Kubernetes create tables the same way.
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U optifuse -d optifuse_db"]
       interval: 5s

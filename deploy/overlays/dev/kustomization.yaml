@@ -1,0 +1,19 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../base
+
+# The base names images without a tag; the overlay pins them. CI will rewrite
+# these with "kustomize edit set image" on every commit (Milestone 6), and
+# ArgoCD will roll out whatever lands here. Tagging by commit SHA means the
+# question "what is running" always has an exact answer.
+images:
+  - name: ghcr.io/vaivaswat2244/optifuse-gateway
+    newTag: "d1ac3ff"
+  - name: ghcr.io/vaivaswat2244/optifuse-parser
+    newTag: "d1ac3ff"
+  - name: ghcr.io/vaivaswat2244/optifuse-enricher
+    newTag: "d1ac3ff"
+  - name: ghcr.io/vaivaswat2244/optifuse-optimizer
+    newTag: "d1ac3ff"
