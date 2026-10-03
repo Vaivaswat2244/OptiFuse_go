@@ -17,3 +17,9 @@ variable "dns_zone" {
   type        = string
   default     = "optifuse.vaivaswat.me"
 }
+
+variable "vercel_ip" {
+  description = "Vercel's anycast A record for apex domains. Vercel shows the current value under Domains when a CNAME is not possible."
+  type        = string
+  default     = "216.198.79.1"
+}

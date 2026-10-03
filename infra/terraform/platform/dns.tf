@@ -52,3 +52,19 @@ resource "azurerm_dns_a_record" "wildcard" {
 
   tags = local.tags
 }
+
+# optifuse.vaivaswat.me itself: the frontend, on Vercel.
+#
+# Vercel suggests a CNAME, but this name is the apex of the delegated zone and
+# an apex cannot be a CNAME (it already carries SOA and NS records). An A record
+# to Vercel's anycast address is how Vercel handles root domains, and it is the
+# same address the portfolio apex already uses.
+resource "azurerm_dns_a_record" "frontend" {
+  name                = "@"
+  zone_name           = azurerm_dns_zone.optifuse.name
+  resource_group_name = var.resource_group_name
+  ttl                 = 300
+  records             = [var.vercel_ip]
+
+  tags = local.tags
+}

@@ -10,10 +10,10 @@ resources:
 # question "what is running" always has an exact answer.
 images:
   - name: ghcr.io/vaivaswat2244/optifuse-gateway
-    newTag: "d1ac3ff"
+    newTag: "e8c86fe"
   - name: ghcr.io/vaivaswat2244/optifuse-parser
-    newTag: "d1ac3ff"
+    newTag: "e8c86fe"
   - name: ghcr.io/vaivaswat2244/optifuse-enricher
-    newTag: "d1ac3ff"
+    newTag: "e8c86fe"
   - name: ghcr.io/vaivaswat2244/optifuse-optimizer
-    newTag: "d1ac3ff"
+    newTag: "e8c86fe"
