@@ -111,7 +111,14 @@ func LiveSimulate(database *db.Pool, clients *grpcclient.Clients) gin.HandlerFun
 		// Step 3: Enrich with CloudWatch data (only if AWS creds are configured).
 		// If not configured, we proceed with zero-value telemetry — algorithms
 		// still work, they just use YAML-derived values instead of real metrics.
-		if profile.AWSRoleARN != "" {
+		//
+		// Which of the two happened is reported back as `telemetry`. The UI used
+		// to say "live performance data from AWS" over numbers that had come from
+		// serverless.yml, with nothing telling the user the enricher never ran.
+		telemetry := "estimates"
+		if profile.AWSRoleARN == "" {
+			warnings = append(warnings, "No AWS role configured. These results use the runtime estimates in serverless.yml; add your role ARN in Settings to use CloudWatch data.")
+		} else {
 			// Log groups are /aws/lambda/{service}-{stage}-{fn}. Both halves come
 			// from the YAML, and `service:` is often not the repo name.
 			// Fall back to the repo name only if the YAML omits `service:`.
@@ -133,6 +140,7 @@ func LiveSimulate(database *db.Pool, clients *grpcclient.Clients) gin.HandlerFun
 				warnings = append(warnings, "CloudWatch enrichment failed: "+err.Error()+"; using YAML-derived values")
 			} else {
 				graph = enriched
+				telemetry = "cloudwatch"
 			}
 		}
 
@@ -150,8 +158,9 @@ func LiveSimulate(database *db.Pool, clients *grpcclient.Clients) gin.HandlerFun
 		}
 
 		c.JSON(http.StatusOK, gin.H{
-			"results":  plan,
-			"warnings": warnings,
+			"results":   plan,
+			"warnings":  warnings,
+			"telemetry": telemetry,
 		})
 	}
 }
