@@ -1,0 +1,114 @@
+# Build on every code change to main, publish images tagged by commit, and
+# record the new tag in the dev overlay. That commit is what ArgoCD deploys.
+#
+# CI never talks to the cluster. It holds no kubeconfig and no cloud
+# credential; its only write is to this repository. The cluster pulls.
+name: ci
+
+on:
+  push:
+    branches: [main]
+    # Code paths only. The tag-bump commit this workflow makes touches
+    # deploy/overlays/ alone, so it cannot retrigger itself.
+    paths:
+      - "services/**"
+      - "shared/**"
+      - "proto/**"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/ci.yml"
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io/vaivaswat2244
+  GO_VERSION: "1.26"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      # glpsol lets the MtxILP round-trip tests run instead of skipping.
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq glpk-utils
+      - run: test -z "$(gofmt -l services shared)" || (gofmt -l services shared && exit 1)
+      - run: go vet ./...
+      - run: go test -count=1 ./...
+
+  build:
+    needs: test
+    # Pull requests get tested, not published.
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        service: [gateway, parser, enricher, optimizer]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: tag
+        run: echo "short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: services/${{ matrix.service }}/Dockerfile
+          push: true
+          tags: ${{ env.REGISTRY }}/optifuse-${{ matrix.service }}:${{ steps.tag.outputs.short }}
+          build-args: |
+            VERSION=${{ steps.tag.outputs.short }}
+            COMMIT=${{ steps.tag.outputs.short }}
+          labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          # Layer cache in GHCR so a one-service change rebuilds only that service's layers.
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/optifuse-${{ matrix.service }}:buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/optifuse-${{ matrix.service }}:buildcache,mode=max
+
+  bump:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    # Two pushes in quick succession must not race each other to main.
+    concurrency:
+      group: bump-dev-overlay
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The checkout is the commit that triggered the run, but main may
+          # have moved on. Fetch so the push below can fast-forward onto it.
+          fetch-depth: 0
+      - name: install kustomize
+        run: |
+          curl -sSL "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.6.0/kustomize_v5.6.0_linux_amd64.tar.gz" | tar -xz
+          sudo mv kustomize /usr/local/bin/
+      - name: pin overlay to this commit
+        run: |
+          TAG=$(git rev-parse --short HEAD)
+          cd deploy/overlays/dev
+          for svc in gateway parser enricher optimizer; do
+            kustomize edit set image "ghcr.io/vaivaswat2244/optifuse-$svc:$TAG"
+          done
+          git diff --stat
+      - name: commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add deploy/overlays/dev/kustomization.yaml
+          git diff --cached --quiet && { echo "overlay already current"; exit 0; }
+          git commit -m "deploy: pin images to $(git rev-parse --short HEAD)"
+          git pull --rebase origin main
+          git push origin HEAD:main

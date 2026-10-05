@@ -1,0 +1,56 @@
+# The one object that connects Git to the cluster. ArgoCD renders
+# deploy/overlays/dev from main, diffs it against what is running in the
+# optifuse namespace, and applies the difference. Applied once by hand to
+# bootstrap; after that, every change goes through Git.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: optifuse
+  namespace: argocd
+  # Without this, deleting the Application leaves the deployed resources
+  # behind as orphans. With it, deletion cascades. Explicit either way is
+  # better than discovering the default.
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/Vaivaswat2244/OptiFuse_go.git
+    targetRevision: main
+    path: deploy/overlays/dev
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: optifuse
+  syncPolicy:
+    automated:
+      # prune: a resource removed from Git is removed from the cluster.
+      # selfHeal: a resource changed by hand is reverted to what Git says.
+      # Together they are what makes Git the source of truth rather than a
+      # suggestion. Secrets are unaffected: they were never in Git, so ArgoCD
+      # has no desired state for them and leaves them alone.
+      prune: true
+      selfHeal: true
+    syncOptions:
+      # Server-side apply lets ArgoCD adopt the objects kubectl created
+      # earlier without fighting over the last-applied annotation.
+      - ServerSideApply=true
+      # Make the sync honour ignoreDifferences too, not only the diff view.
+      - RespectIgnoreDifferences=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
+  # The API server fills in apiVersion, kind, volumeMode and a status on a
+  # StatefulSet's volumeClaimTemplates, and templates are immutable after
+  # creation, so no apply can ever make live match Git. Without this the app
+  # sits at OutOfSync forever and self-heal re-applies it every few minutes.
+  ignoreDifferences:
+    - group: apps
+      kind: StatefulSet
+      jqPathExpressions:
+        - .spec.volumeClaimTemplates[].apiVersion
+        - .spec.volumeClaimTemplates[].kind
+        - .spec.volumeClaimTemplates[].spec.volumeMode
+        - .spec.volumeClaimTemplates[].status

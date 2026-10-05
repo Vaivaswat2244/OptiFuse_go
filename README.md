@@ -8,28 +8,43 @@ deployment to spend less money — and by how much.
 
 ## The idea
 
-A serverless application built as a chain of small Lambdas pays twice for every hop between
-them: once in **data transfer** (the payload crosses the network) and once in **latency** (a
-cold cross-function invoke, roughly 10–20 ms). Merge two functions into one deployment and
-both costs disappear for that edge — the call becomes an in-process function call.
+A serverless application built as a chain of small Lambdas pays for every hop between them:
+once in **request charges** (the platform bills each function it invokes, $0.20 per million)
+and once in **latency** (a cross-function invoke, roughly 10–20 ms, plus a cold start if the
+callee has none warm). Merge two functions into one deployment and the call between them
+becomes an in-process function call: no request charge, no hop.
 
-You cannot merge everything, though. A fused group is bounded by memory, and every hop you
-*keep* adds latency to your critical path. So the question is a **graph partitioning problem**:
+Fusion is not free, though. A Lambda has one memory setting, so a fused function is sized for
+its heaviest member and every lighter member runs at that setting for its whole duration.
+Fold a 128 MB handler in with a 1024 MB one and the light path bills at 8× what it did. Which
+side wins depends on the durations and memory tiers involved, which is why the question is a
+**graph partitioning problem** with a trade-off rather than an answer:
 
-> Partition the call graph into groups such that total cost is minimised, subject to
-> a per-group memory cap and an end-to-end latency budget.
+> Partition the call graph into groups. For each partition, cost is request charges plus
+> execution at group memory; latency is the critical path plus a hop per cut edge on it.
 
-OptiFuse builds that graph, runs six different partitioning algorithms over it, and ranks
-their answers by total cost.
+OptiFuse builds that graph from your `serverless.yml`, fills in real durations and invocation
+rates from your CloudWatch, runs six partitioning algorithms, and shows you the **Pareto
+frontier**: every partition that nothing else beats on both cost and latency. When one option
+dominates everything it says so. When it does not, it shows you the cheapest, the fastest,
+and the gap between them, and leaves the choice where it belongs.
 
 ```
-       upload ─5MiB─► resize ─2MiB─► watermark ─2MiB─┐
-          │                                          ├─► store
-          └────5MiB─► filter ─3MiB─► optimize ─1MiB──┘
+       upload ──► resize ──► watermark ──┐
+          │                              ├─► store
+          └─────► filter ──► optimize ───┘
 
-  becomes  { upload, resize }  { watermark, store }  { filter, optimize }
-           ─ 3 deployments instead of 6, ~55% cheaper
+  Measured (image-processing test app, per million invocations):
+
+    no fusion                 $3.50   297 ms
+    MinWCut / MtxILP          $2.98   297 ms   cheapest: {filter, optimize, store} fused
+    GreedyTP                  $3.08   287 ms
+    Singleton (all in one)    $3.23   267 ms   fastest, pays to run upload at 512 MB
 ```
+
+An earlier version of this model charged data transfer on every cut edge and reported savings
+of up to 95%. Same-region Lambda-to-Lambda invocation is not billed as data transfer. The
+story of finding that out is [here](https://medium.com/@vaivaswat2244/i-built-a-serverless-function-fusion-optimizer-then-i-changed-what-it-optimizes-e4daedbfe05b).
 
 ---
 
@@ -131,31 +146,48 @@ interface, each in its own file.
 | Algorithm | Kind | Approach |
 |---|---|---|
 | `NoFusion` | baseline | Every function separate. The number everything else is measured against. |
-| `Singleton` | baseline | Everything in one group. Usually infeasible on memory — that's the point. |
-| `MinWCut` | heuristic | Greedy merge by descending edge weight, subject to the memory cap. |
-| `GreedyTP` | heuristic | Cut the critical path to satisfy latency, BFS-assign the rest, then greedily merge. |
-| `CostlessCSP` | heuristic | Label-setting over the Pareto frontier of (cost, latency). |
-| `MtxILP` | **exact** | Formulates an ILP and shells out to `glpsol`. Optimal, exponential worst case. |
+| `Singleton` | baseline | Everything in one group, sized to the heaviest member. Usually the fastest option and rarely the cheapest. |
+| `MinWCut` | heuristic | Greedy merge along edges, accepting a merge only when the request saving exceeds the re-tiering cost. |
+| `GreedyTP` | heuristic | Cut the critical path to satisfy latency, BFS-assign the rest, then greedily merge under the same gate. |
+| `CostlessCSP` | heuristic | Label-setting over (cost, latency) states. |
+| `MtxILP` | **exact** | Mixed-integer program solved by `glpsol`: request charge on cut edges plus execution with group memory linearised as a max. The cheapest feasible partition under the latency cap. |
 
 `MtxILP` writes a CPLEX LP file to a temp path and invokes GLPK with a 60-second limit. If
-`glpsol` is missing the algorithm returns a descriptive error instead of failing the run — the
+`glpsol` is missing the algorithm returns a descriptive error instead of failing the run; the
 other five still produce results.
+
+Every result is then placed on the Pareto frontier (`algo/frontier.go`): a result is
+*dominated* if another is no worse on both cost and latency and strictly better on one. The
+response carries the full set, the dominance relation, the cheapest, the fastest, and whether
+one option is unambiguously best.
 
 ### Cost model
 
+Per application invocation, summed over fused groups:
+
 ```
-execution:      $0.00001667 per GB-second
-data transfer:  $0.01 per GiB on every cut edge
-latency:        Σ(runtime of critical path) + networkHopMS × (cut edges on that path)
+request:     $0.0000002 × (invocation rate of each group's entry function)
+execution:   $0.00001667 × (max member memory in GB) × Σ(member runtime in seconds)
+transfer:    $0 by default (same-region Lambda-to-Lambda is not billed); configurable
+latency:     Σ(runtime of critical path) + networkHopMS × (cut edges on that path)
 ```
 
-Feasible means: no group exceeds `maxMemoryMB` **and** latency ≤ `maxLatencyMS`.
+Invocation rates come from CloudWatch invocation counts relative to the entry function, so a
+fan-out target invoked twice per request saves two request charges when fused. Group memory is
+the **largest** member, which is how Lambda actually provisions a single function; the
+difference between that and each member's own memory, over the member's runtime, is the
+re-tiering penalty that makes some fusions unprofitable.
 
-⚠️ **Read `services/optimizer/internal/algo/optimizer.go` before trusting a number.** The
-package doc there records three deliberate simplifications — most importantly that a fused
-group is charged the *sum* of its members' memory rather than one allocation, which
-structurally penalises fusion, and that the solvers minimise cut-transfer while results are
-ranked on total cost.
+Feasible means: no member exceeds `maxMemoryMB` **and** latency ≤ `maxLatencyMS`.
+
+Known gaps, all tracked in `algo/optimizer.go`:
+
+- **Cold starts are measured but not modelled.** The enricher reports average and p99 init
+  duration and the cold-start rate per function (on the test apps, ~366 ms init against a
+  ~133 ms warm critical path). The latency figure does not yet include them.
+- **Provisioned concurrency** is not a candidate. It is the competing lever for tail latency.
+- The pairwise profitability gate in the heuristics cannot see a merge that is unprofitable in
+  isolation but pays off inside a larger group. `MtxILP` can.
 
 ---
 
@@ -190,19 +222,23 @@ custom:
       watermark: { avgDurationMs: 150 }
 
     constraints:
-      maxMemoryMB: 1024           # cap per fused group (group memory = SUM of members)
+      maxMemoryMB: 1024           # no single function may exceed this
       maxLatencyMS: 700           # budget for the critical path
       networkHopMS: 10            # latency added per cut edge on that path
+      # dataTransferUSDPerGiB: 0  # only if your topology crosses a billed boundary
 ```
 
-- **Edge bytes drive everything.** Data transfer is the cost fusion eliminates. Rough estimates
-  are fine; orders of magnitude are what matter.
+- **Edges define the graph; their byte counts no longer drive cost.** Same-region
+  Lambda-to-Lambda invocation is not billed as data transfer, so `dataTransferUSDPerGiB`
+  defaults to zero. Set it if calls cross regions or leave AWS.
 - **`criticalPath` is required** by GreedyTP and CostlessCSP — they error without it, and the
   latency constraint goes unenforced.
 - **`functions.avgDurationMs` matters more than it looks.** The only other runtime signal is
   `timeout`, in whole seconds, defaulting to 30 — roughly 100× a typical Lambda duration. Left
-  at the default, execution cost swamps transfer cost and nothing fuses. These values land on
-  the same field the enricher writes, so real CloudWatch data supersedes them per function.
+  at the default, the re-tiering penalty swamps the request saving and nothing fuses. These
+  values land on the same field the enricher writes, so real CloudWatch data supersedes them
+  per function. The response says which was used (`telemetry: cloudwatch | estimates`), and
+  the UI labels results accordingly.
 - **Telemetry does not supply the graph.** The Logs Insights query over `@type = "REPORT"`
   records returns duration, memory and invocation count — no caller→callee information. Traffic
   improves the numbers; it does not create edges.
@@ -357,16 +393,35 @@ Still missing:
 
 ---
 
-## Deployment notes
+## Deployment
 
-The `docker-compose.yml` here is a **development** topology and should not be lifted as-is:
+OptiFuse runs at [optifuse.vaivaswat.me](https://optifuse.vaivaswat.me) (frontend on Vercel) and
+[api.optifuse.vaivaswat.me](https://api.optifuse.vaivaswat.me/readyz) (backend on AKS). Everything
+about the backend deployment is in this repository:
 
-- Every service publishes its port to the host, including Postgres and the internal gRPC
-  services. In a real deployment only the gateway should be reachable.
-- Postgres credentials are hardcoded in the compose file.
-- Postgres has no volume — **data is lost on `docker compose down`**, which also regenerates
-  every profile's AWS external ID and breaks existing customer CloudFormation stacks.
-- There are no resource limits, and no readiness/liveness distinction.
+```
+infra/terraform/aks/        resource group + AKS cluster (one B2s node, OIDC issuer enabled)
+infra/terraform/platform/   DNS zone, ingress-nginx, cert-manager, ArgoCD
+deploy/base/                Kustomize base: namespace, ConfigMap, Postgres, 4 services, Ingress
+deploy/overlays/dev/        image tags, pinned to a commit SHA
+deploy/cluster/             Let's Encrypt ClusterIssuers
+deploy/argocd/              the ArgoCD Application that watches deploy/overlays/dev
+.github/workflows/ci.yml    test → build → push to GHCR → commit the new tag to the overlay
+```
+
+The loop: a push to `main` that touches code builds four images tagged with the commit SHA and
+commits that tag into `deploy/overlays/dev`. ArgoCD, inside the cluster, applies what Git says.
+CI holds no cluster credential; the cluster pulls.
+
+Hand-created and documented rather than committed: three Kubernetes Secrets (Postgres password,
+gateway OAuth + database URL, enricher AWS keys) and four NS records at the registrar delegating
+`optifuse.vaivaswat.me` to Azure DNS.
+
+`docs/DEPLOYMENT_GUIDE.md` walks through every piece, why it is shaped the way it is, and what
+breaks otherwise.
+
+The `docker-compose.yml` is the **development** topology: ports published to the host,
+hardcoded Postgres credentials, no resource limits. It is not the deployment.
 
 ---
 
@@ -376,8 +431,14 @@ The `docker-compose.yml` here is a **development** topology and should not be li
 - [x] Build a call graph from a `custom.optifuse` block
 - [x] Six partitioning algorithms, ranked by cost under memory and latency constraints
 - [x] CloudWatch telemetry through a customer-supplied cross-account IAM role
-- [x] Show the recommended grouping — which functions to merge, with per-group memory,
-      runtime and cost
+- [x] Show the Pareto frontier: every option nothing else beats, with cheapest, fastest and
+      the gap between them; a single recommendation only when one option dominates
+- [x] Deployed: Terraform-built AKS, Kustomize manifests, Let's Encrypt TLS, ArgoCD, CI to GHCR
+- [ ] Cold-start term in the latency model (init duration is already measured per function)
+- [ ] Provisioned concurrency as a competing candidate
+- [ ] Before/after measurement: deploy a recommended fusion and compare real CloudWatch numbers
+- [ ] Workload identity for the enricher (no stored AWS keys)
+- [ ] Prometheus + Grafana dashboard on the services' existing `/metrics`
 - [ ] Derive the call graph from X-Ray traces instead of a hand-written block *(needs the
       customer's handlers instrumented with `aws-xray-sdk-core`; raw `InvokeCommand` does not
       propagate the trace header, so every Lambda lands in its own trace)*
